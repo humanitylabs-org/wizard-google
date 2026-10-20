@@ -1,0 +1,5 @@
+__pycache__/
+.data/
+qa/shots/
+node_modules/
+*.pyc

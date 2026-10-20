@@ -1,0 +1,80 @@
+/* Google app styles. Every colour comes from the Appearance v1 roles via ui.css (--ink, --fill, --accent …). */
+[hidden] { display: none !important; }
+.wz-scroll { padding-bottom: 28px; }
+.muted { color: var(--ink-3); font-size: 13.5px; margin: 0 0 10px; }
+.intro { color: var(--ink-2); font-size: 14px; margin: 2px 8px 12px; }
+.pad { padding: 8px; }
+.wz-sec { padding: 4px 0 6px; }
+.wz-sec .wz-card { margin: 8px 6px; }
+.chev { flex: none; color: var(--ink-3); font-size: 20px; padding: 0 4px; }
+.wz-tile { font-weight: 700; color: var(--accent); }
+
+/* buttons and links that look like buttons */
+a.wz-button { display: inline-flex; align-items: center; justify-content: center; text-decoration: none; }
+.wz-button.small { min-height: 34px; padding: 4px 12px; font-size: 13px; }
+.wz-button.danger { background: color-mix(in srgb, var(--danger) 18%, transparent); color: var(--danger); border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent); }
+.wz-button.secondary.danger { margin: 10px 8px; }
+label.wz-button { display: inline-flex; align-items: center; cursor: pointer; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.wz-chip.linkish { text-decoration: none; color: var(--accent); min-height: 32px; }
+.inline { color: var(--accent); }
+
+/* home */
+.hero-title { margin: 0 0 6px; font-size: 19px; font-weight: 700; letter-spacing: -.01em; }
+.next { margin: 10px 0 12px; font-size: 14px; color: var(--ink-2); }
+.progress { display: flex; gap: 5px; margin-top: 12px; }
+.progress i { flex: 1; height: 5px; border-radius: 3px; background: var(--fill-2); }
+.progress i.done { background: var(--accent); }
+.progress i.now { background: color-mix(in srgb, var(--accent) 45%, transparent); }
+.wz-card.warn { border-color: color-mix(in srgb, var(--danger) 45%, transparent); background: color-mix(in srgb, var(--danger) 9%, transparent); margin: 8px 6px; }
+.wz-card.warn p { margin: 0 0 4px; }
+.wz-card.ask { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+.ask-title { margin: 0 0 4px; font-weight: 650; }
+.reason { margin: 4px 0 0; color: var(--ink-2); font-style: italic; }
+
+/* crumb */
+.crumb { display: flex; align-items: center; gap: 4px; padding: 6px 0 6px; }
+.crumb h2 { margin: 0; font-size: 18px; font-weight: 700; overflow-wrap: anywhere; }
+.back { flex: none; width: 44px; height: 44px; border-radius: var(--r); font-size: 28px; line-height: 1; color: var(--ink-2); }
+.back:hover { background: var(--fill); }
+
+/* setup steps */
+.steps { list-style: none; margin: 0; padding: 0 2px; display: flex; flex-direction: column; gap: 8px; }
+.step { border: 1px solid var(--line); border-radius: var(--r); background: var(--fill); }
+.step.current { border-color: color-mix(in srgb, var(--accent) 55%, transparent); background: var(--fill-2); }
+.step-head { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 56px; padding: 10px 12px; text-align: left; }
+.num { flex: none; width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; font-size: 14px; font-weight: 700; border: 2px solid var(--line-2); color: var(--ink-2); }
+html[data-skin="signal"] .num { border-radius: 2px; }
+.step.current .num { border-color: var(--accent); color: var(--accent); }
+.step.done .num { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.step-title { flex: 1; font-weight: 600; font-size: 15px; }
+.step.done .step-title { color: var(--ink-2); }
+.where { flex: none; font-size: 11.5px; padding: 2px 8px; }
+.step-body { padding: 0 14px 14px 54px; }
+.detail { margin: 0 0 8px; padding-left: 18px; color: var(--ink-2); font-size: 14px; }
+.detail li { margin: 3px 0; }
+.detected { color: var(--danger); font-size: 13.5px; margin: 6px 0 0; }
+.copy { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin: 10px 0 0; padding: 10px 12px; border-radius: var(--r-tile); border: 1px solid var(--line); background: var(--fill); }
+.copy small { width: 100%; color: var(--ink-3); font-size: 12px; }
+.copy code { flex: 1; min-width: 0; font: 13px/1.35 var(--wz-font-mono); color: var(--ink); overflow-wrap: anywhere; user-select: all; }
+.paste { margin-top: 8px; }
+.paste .area { display: block; width: 100%; height: auto; min-height: 92px; padding: 10px 14px; border-radius: var(--r-tile); font: 12.5px/1.4 var(--wz-font-mono); resize: vertical; }
+.result { color: var(--danger); font-size: 13.5px; margin: 8px 0 0; }
+.foot { display: flex; flex-wrap: wrap; gap: 8px; padding: 14px 4px 0; }
+
+/* account and caller views */
+.chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 8px; }
+.wz-chip.state-ok { color: var(--accent); }
+.toggle { gap: 8px; }
+.toggle:disabled { opacity: .5; cursor: default; }
+.ops .group { margin: 10px 8px 2px; font-size: 12px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); }
+
+/* sheet */
+.wz-sheet { width: min(440px, calc(100% - 24px)); }
+.wz-sheet h2 { margin: 0 0 8px; font-size: 18px; }
+.spinner { width: 28px; height: 28px; margin: 12px auto; border-radius: 50%; border: 3px solid var(--line-2); border-top-color: var(--accent); animation: spin 900ms linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+/* A ticked permission is the important state, not a finished to-do: keep it bright. */
+.toggle[aria-pressed="true"] .wz-main b { color: var(--ink); }
+/* Sheet actions stay in reach while the list scrolls. */
+.wz-sheet > .actions:last-child { position: sticky; bottom: calc(-1 * var(--wz-space-4)); margin: 12px calc(-1 * var(--wz-space-4)) calc(-1 * var(--wz-space-4)); padding: 12px var(--wz-space-4) var(--wz-space-4); background: var(--wz-overlay); backdrop-filter: blur(20px); border-top: 1px solid var(--line); }

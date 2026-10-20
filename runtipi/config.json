@@ -1,0 +1,31 @@
+{
+  "name": "Google",
+  "id": "wizard-google",
+  "wizard_type": "external",
+  "available": true,
+  "short_desc": "External: Gmail, Calendar, Drive, Contacts and YouTube on your own Google client.",
+  "author": "Humanity Labs",
+  "port": 18812,
+  "categories": ["utilities"],
+  "description": "Your Google accounts in Wizard, signed in with your own Google Cloud OAuth client. Tokens stay on this box; apps and agents get only the operations you allow, per account. Set up inside the app.",
+  "tipi_version": 1,
+  "version": "0.1.0",
+  "source": "https://github.com/humanitylabs-org/wizard-google",
+  "exposable": false,
+  "supported_architectures": ["amd64", "arm64"],
+  "created_at": 1792454400000,
+  "updated_at": 1792454400000,
+  "dynamic_config": true,
+  "min_tipi_version": "4.8.0",
+  "uid": 1000,
+  "gid": 1000,
+  "form_fields": [
+    {"type": "text", "label": "External: Owner tailnet logins", "hint": "Comma-separated Tailscale logins allowed to use the page inside the Wizard shell.", "required": false, "env_variable": "WIZARD_OWNER_LOGINS"},
+    {"type": "text", "label": "External: Trusted hosts", "hint": "Comma-separated exact shell Host values.", "required": false, "env_variable": "WIZARD_TRUSTED_HOSTS"},
+    {"type": "text", "label": "External: Trusted origins", "hint": "Comma-separated exact shell origins (https://…).", "required": false, "env_variable": "WIZARD_TRUSTED_ORIGINS"},
+    {"type": "text", "label": "External: Shared return page", "hint": "Optional. Only for a box without its own https address.", "required": false, "env_variable": "GOOGLE_RELAY_CALLBACK"},
+    {"type": "password", "label": "External: Gateway owner secret", "hint": "Optional: for a gateway that injects X-Wizard-Owner-Token instead of Tailscale identity.", "required": false, "env_variable": "WIZARD_OWNER_TOKEN"},
+    {"type": "password", "label": "External: MCP admin secret", "hint": "Optional bearer for MCP from outside this box.", "required": false, "env_variable": "WIZARD_ADMIN_TOKEN"}
+  ],
+  "no_gui": false
+}

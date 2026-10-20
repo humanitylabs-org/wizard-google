@@ -1,0 +1,11 @@
+# Not deployed. Deploying this page is a separate owner decision (see REPORT open questions).
+name = "wizard-google-auth"
+main = "worker.mjs"
+compatibility_date = "2026-10-01"
+workers_dev = false
+routes = [{ pattern = "www.aiwizards.com/wizard-google/auth/*", zone_name = "aiwizards.com" }]
+[observability]
+enabled = false
+[observability.logs]
+enabled = false
+invocation_logs = false

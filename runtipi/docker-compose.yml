@@ -1,0 +1,36 @@
+# Google: one app, one container. Your Google client, the encrypted sign-ins, the store key and every grant
+# live in ${APP_DATA_DIR}/data: a bind mount, so App Manager backups and box moves carry them.
+# No named volumes (backups skip those). The page, apps and agents never receive a Google token.
+services:
+  wizard-google:
+    image: ${GOOGLE_IMAGE:-ghcr.io/humanitylabs-org/wizard-google:0.1.0}
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    mem_limit: 256m
+    tmpfs: ["/tmp:rw,nosuid,size=16m,uid=1000,gid=1000"]
+    environment:
+      PORT: "18812"
+      DATA_DIR: /data
+      # Optional stateless return page for boxes without their own https address (see relay/).
+      GOOGLE_RELAY_CALLBACK: ${GOOGLE_RELAY_CALLBACK:-}
+      # Inside the Wizard shell, Tailscale Serve names the signed-in tailnet user; only these logins own the page.
+      WIZARD_SHELL_AUTH: ${WIZARD_SHELL_AUTH:-tailscale-serve}
+      WIZARD_OWNER_LOGINS: ${WIZARD_OWNER_LOGINS:-}
+      WIZARD_SHELL_PATH: ${WIZARD_SHELL_PATH:-/wizard-google/}
+      WIZARD_TRUSTED_HOSTS: ${WIZARD_TRUSTED_HOSTS:-}
+      WIZARD_TRUSTED_ORIGINS: ${WIZARD_TRUSTED_ORIGINS:-}
+      WIZARD_OWNER_TOKEN: ${WIZARD_OWNER_TOKEN:-}
+      WIZARD_ADMIN_TOKEN: ${WIZARD_ADMIN_TOKEN:-}
+      WIZARD_MCP_BOX_ONLY: ${WIZARD_MCP_BOX_ONLY:-true}
+      WIZARD_FRAME_ANCESTORS: ${WIZARD_FRAME_ANCESTORS:-'self'}
+    volumes:
+      - ${APP_DATA_DIR}/data:/data
+    x-runtipi:
+      is_main: true
+      internal_port: 18812
+x-runtipi:
+  schema_version: 2
+  overrides: []

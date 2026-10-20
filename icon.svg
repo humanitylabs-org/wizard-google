@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+<defs>
+ <linearGradient id="base" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#17121F"/><stop offset="1" stop-color="#0C0A12"/></linearGradient>
+ <radialGradient id="top" cx=".5" cy="-.08" r=".75"><stop offset="0" stop-color="#00D6CF" stop-opacity=".40"/><stop offset=".8" stop-color="#00D6CF" stop-opacity="0"/></radialGradient>
+ <radialGradient id="bot" cx=".5" cy="1.2" r=".6"><stop offset="0" stop-color="#00D6CF" stop-opacity=".26"/><stop offset="1" stop-color="#00D6CF" stop-opacity="0"/></radialGradient>
+ <radialGradient id="bloom" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#00D6CF" stop-opacity=".42"/><stop offset="1" stop-color="#00D6CF" stop-opacity="0"/></radialGradient>
+ <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFFFFF" stop-opacity=".07"/><stop offset=".38" stop-color="#FFFFFF" stop-opacity="0"/></linearGradient>
+ <linearGradient id="lit" x1=".4" y1="0" x2=".6" y2="1"><stop offset="0" stop-color="#94EEEB"/><stop offset=".46" stop-color="#00D6CF"/><stop offset="1" stop-color="#05AEAF"/></linearGradient>
+ <filter id="soft" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="22"/></filter>
+ <filter id="lift" x="-10%" y="-10%" width="120%" height="130%"><feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#000" flood-opacity=".35"/></filter>
+ <clipPath id="sq"><rect width="512" height="512" rx="164"/></clipPath>
+</defs>
+<g clip-path="url(#sq)">
+ <rect width="512" height="512" fill="url(#base)"/>
+ <rect width="512" height="512" fill="url(#top)"/>
+ <rect width="512" height="512" fill="url(#bot)"/>
+ <circle cx="256" cy="256" r="160" fill="url(#bloom)" filter="url(#soft)"/>
+ <g transform="translate(76.8 76.8) scale(0.7)" filter="url(#lift)"><path d="M242 256Q242 269 246 281Q251 298 265 313Q286 333 314 336Q315 336 316 336Q319 336 322 336Q355 336 379 313Q402 289 402 256Q402 223 379 199Q355 176 322 176Q314 176 306 177Q299 167 289 157Q283 151 276 145Q298 136 322 136Q346 136 369 145Q390 155 407 171Q423 188 433 209Q442 232 442 256Q442 280 433 303Q423 324 407 341Q390 357 369 367Q346 376 322 376Q313 376 305 375Q290 373 275 367Q254 357 237 341Q221 324 211 303Q211 302 211 301L211 301Q202 279 202 256Q202 232 211 209Q213 205 215 201Q225 206 232 214Q240 222 245 231C245 231 245 231 246 231Q242 243 242 256ZM110 256Q110 289 133 313Q157 336 190 336Q198 336 206 335Q213 345 223 355Q229 361 236 367Q214 376 190 376Q166 376 143 367Q122 357 105 341Q89 324 79 303Q70 280 70 256Q70 232 79 209Q89 188 105 171Q122 155 143 145Q166 136 190 136Q199 136 207 137Q222 139 237 145Q258 155 275 171Q291 188 301 209Q301 210 301 211L301 211Q310 233 310 256Q310 280 301 303Q299 307 297 311Q287 306 280 298Q272 290 267 281C267 281 267 281 266 281Q270 269 270 256Q270 243 266 231Q261 214 247 199Q226 179 198 176Q197 176 196 176Q193 176 190 176Q157 176 133 199Q110 223 110 256Z" fill="url(#lit)" fill-rule="nonzero"/></g>
+ <rect width="512" height="512" fill="url(#sheen)"/>
+</g>
+<rect x="2" y="2" width="508" height="508" rx="162" fill="none" stroke="#00D6CF" stroke-opacity=".38" stroke-width="4"/>
+</svg>

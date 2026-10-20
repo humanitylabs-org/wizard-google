@@ -1,0 +1,102 @@
+{
+ "nebula": {
+  "colorScheme": "dark",
+  "tokens": {
+   "canvas": "transparent",
+   "base": "#05030c",
+   "chrome": "rgba(12,8,26,.82)",
+   "overlay": "rgba(28,19,58,.72)",
+   "surface": "color-mix(in srgb, #f3efff 6%, transparent)",
+   "surface-raised": "color-mix(in srgb, #f3efff 10%, transparent)",
+   "text": "#f3efff",
+   "text-secondary": "#b9b0d8",
+   "text-muted": "#7d74a3",
+   "border": "rgba(205,190,255,.24)",
+   "accent": "#b99bff",
+   "accent-soft": "color-mix(in srgb, #b99bff 16%, transparent)",
+   "on-accent": "#05030c",
+   "reader-surface": "transparent"
+  },
+  "backdrop": "radial-gradient(120% 70% at 20% 0%, color-mix(in srgb, #b99bff 22%, #05030c) 0%, #05030c 60%)"
+ },
+ "grove": {
+  "colorScheme": "dark",
+  "tokens": {
+   "canvas": "transparent",
+   "base": "#050b07",
+   "chrome": "rgba(8,15,10,.84)",
+   "overlay": "rgba(16,32,22,.78)",
+   "surface": "color-mix(in srgb, #eef5e9 6%, transparent)",
+   "surface-raised": "color-mix(in srgb, #eef5e9 10%, transparent)",
+   "text": "#eef5e9",
+   "text-secondary": "#b5cbb9",
+   "text-muted": "#7f9a86",
+   "border": "rgba(207,232,200,.26)",
+   "accent": "#e6c66b",
+   "accent-soft": "color-mix(in srgb, #e6c66b 16%, transparent)",
+   "on-accent": "#050b07",
+   "reader-surface": "transparent"
+  },
+  "backdrop": "radial-gradient(120% 70% at 20% 0%, color-mix(in srgb, #e6c66b 22%, #050b07) 0%, #050b07 60%)"
+ },
+ "tide": {
+  "colorScheme": "dark",
+  "tokens": {
+   "canvas": "transparent",
+   "base": "#052a36",
+   "chrome": "rgba(4,26,34,.82)",
+   "overlay": "rgba(8,56,72,.7)",
+   "surface": "color-mix(in srgb, #e8f6f8 6%, transparent)",
+   "surface-raised": "color-mix(in srgb, #e8f6f8 10%, transparent)",
+   "text": "#e8f6f8",
+   "text-secondary": "#a9cdd4",
+   "text-muted": "#6f98a2",
+   "border": "rgba(168,230,238,.27)",
+   "accent": "#7fd8ff",
+   "accent-soft": "color-mix(in srgb, #7fd8ff 16%, transparent)",
+   "on-accent": "#052a36",
+   "reader-surface": "transparent"
+  },
+  "backdrop": "radial-gradient(120% 70% at 20% 0%, color-mix(in srgb, #7fd8ff 22%, #052a36) 0%, #052a36 60%)"
+ },
+ "ember": {
+  "colorScheme": "dark",
+  "tokens": {
+   "canvas": "transparent",
+   "base": "#090504",
+   "chrome": "rgba(16,9,5,.85)",
+   "overlay": "rgba(36,19,11,.8)",
+   "surface": "color-mix(in srgb, #ffe9d6 6%, transparent)",
+   "surface-raised": "color-mix(in srgb, #ffe9d6 10%, transparent)",
+   "text": "#ffe9d6",
+   "text-secondary": "#d4b49c",
+   "text-muted": "#a0806a",
+   "border": "rgba(255,176,122,.27)",
+   "accent": "#ffb470",
+   "accent-soft": "color-mix(in srgb, #ffb470 16%, transparent)",
+   "on-accent": "#090504",
+   "reader-surface": "transparent"
+  },
+  "backdrop": "radial-gradient(120% 70% at 20% 0%, color-mix(in srgb, #ffb470 22%, #090504) 0%, #090504 60%)"
+ },
+ "signal": {
+  "colorScheme": "dark",
+  "tokens": {
+   "canvas": "transparent",
+   "base": "#000000",
+   "chrome": "rgba(0,10,4,.86)",
+   "overlay": "rgba(0,20,8,.76)",
+   "surface": "color-mix(in srgb, #d8ffd8 6%, transparent)",
+   "surface-raised": "color-mix(in srgb, #d8ffd8 10%, transparent)",
+   "text": "#d8ffd8",
+   "text-secondary": "#8fc79a",
+   "text-muted": "#4f8a5a",
+   "border": "rgba(57,255,140,.32)",
+   "accent": "#ffbe55",
+   "accent-soft": "color-mix(in srgb, #ffbe55 16%, transparent)",
+   "on-accent": "#000000",
+   "reader-surface": "transparent"
+  },
+  "backdrop": "radial-gradient(120% 70% at 20% 0%, color-mix(in srgb, #ffbe55 22%, #000000) 0%, #000000 60%)"
+ }
+}

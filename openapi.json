@@ -1,0 +1,193 @@
+{
+ "openapi": "3.1.0",
+ "info": {
+  "title": "Wizard Google: app API",
+  "version": "0.1.0",
+  "description": "For other Wizard apps on this box. Identify with X-Wizard-Grant (App Manager grant, PR #6) or Authorization: Bearer wgk_\u2026 (access key made by the owner in the Google app). Owner browser credentials are refused. Wizard makes every Google call; no response carries a Google token."
+ },
+ "components": {
+  "securitySchemes": {
+   "wizardGrant": {
+    "type": "apiKey",
+    "in": "header",
+    "name": "X-Wizard-Grant"
+   },
+   "accessKey": {
+    "type": "http",
+    "scheme": "bearer"
+   }
+  },
+  "schemas": {
+   "Error": {
+    "type": "object",
+    "properties": {
+     "error": {
+      "type": "object",
+      "properties": {
+       "code": {
+        "type": "string"
+       },
+       "message": {
+        "type": "string"
+       },
+       "fix_url": {
+        "type": "string"
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ "security": [
+  {
+   "wizardGrant": []
+  },
+  {
+   "accessKey": []
+  }
+ ],
+ "paths": {
+  "/consumer/v1/status": {
+   "get": {
+    "summary": "Accounts and the operations this app may use on each",
+    "responses": {
+     "200": {
+      "description": "Caller status"
+     },
+     "401": {
+      "description": "caller_unknown"
+     }
+    }
+   }
+  },
+  "/consumer/v1/call": {
+   "post": {
+    "summary": "Run one operation on an account the owner granted",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "operation"
+        ],
+        "properties": {
+         "operation": {
+          "type": "string",
+          "enum": [
+           "gmail.search",
+           "gmail.read",
+           "gmail.send",
+           "calendar.read",
+           "calendar.write",
+           "drive.search",
+           "drive.read",
+           "contacts.read",
+           "youtube.read"
+          ]
+         },
+         "account": {
+          "type": "string",
+          "description": "Email; optional when one account is granted"
+         },
+         "args": {
+          "type": "object"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Operation result"
+     },
+     "403": {
+      "description": "grant_required | google_permission_missing",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "409": {
+      "description": "api_not_enabled (fix_url) | reauth_required"
+     }
+    }
+   }
+  },
+  "/consumer/v1/request": {
+   "post": {
+    "summary": "Ask the owner for operations; waits on the Google app home screen",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "operations"
+        ],
+        "properties": {
+         "operations": {
+          "type": "array",
+          "items": {
+           "type": "string",
+           "enum": [
+            "gmail.search",
+            "gmail.read",
+            "gmail.send",
+            "calendar.read",
+            "calendar.write",
+            "drive.search",
+            "drive.read",
+            "contacts.read",
+            "youtube.read"
+           ]
+          }
+         },
+         "account": {
+          "type": "string"
+         },
+         "reason": {
+          "type": "string",
+          "maxLength": 200
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {
+      "description": "Request waiting for the owner"
+     }
+    }
+   }
+  },
+  "/api/connection": {
+   "get": {
+    "summary": "wizard.google-connection/1 read-only status (box only, never a token)",
+    "security": [],
+    "responses": {
+     "200": {
+      "description": "Status"
+     }
+    }
+   }
+  },
+  "/healthz": {
+   "get": {
+    "summary": "Health",
+    "security": [],
+    "responses": {
+     "200": {
+      "description": "ok"
+     }
+    }
+   }
+  }
+ }
+}
