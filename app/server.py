@@ -116,13 +116,13 @@ TOOL_OPS = {
     'google_gmail_search': ('gmail.search', 'Search the owner\'s Gmail. Returns sender, subject, date and a short preview per message.',
                             {'query': {'type': 'string', 'description': 'Gmail search, e.g. "from:anna newer_than:7d"'}, 'max': {'type': 'integer', 'minimum': 1, 'maximum': 25}}, []),
     'google_gmail_read': ('gmail.read', 'Read one Gmail message as plain text.', {'id': {'type': 'string'}}, ['id']),
-    'google_gmail_send': ('gmail.send', 'Send an email from the owner\'s Gmail. Only when the owner asked for this exact email.',
+    'google_gmail_send': ('gmail.send', 'Propose an exact email from the owner\'s Gmail. Always returns pending owner approval, even with a grant. The owner taps Approve in the Google app to send once. Do not resubmit; inspect google_status.write_requests for the result.',
                           {'to': {'type': 'array', 'items': {'type': 'string'}}, 'cc': {'type': 'array', 'items': {'type': 'string'}},
                            'subject': {'type': 'string'}, 'body': {'type': 'string'}, 'thread_id': {'type': 'string'}}, ['to', 'subject', 'body']),
     'google_calendar_events': ('calendar.read', 'List calendar events in a time range (RFC 3339 times).',
                                {'time_min': {'type': 'string'}, 'time_max': {'type': 'string'}, 'query': {'type': 'string'},
                                 'calendar_id': {'type': 'string'}, 'max': {'type': 'integer', 'minimum': 1, 'maximum': 100}}, []),
-    'google_calendar_create': ('calendar.write', 'Add an event to the owner\'s calendar.',
+    'google_calendar_create': ('calendar.write', 'Propose an exact calendar event. Always returns pending owner approval. The owner taps Approve in the Google app to create once; inspect google_status.write_requests, never resubmit to check status.',
                                {'summary': {'type': 'string'}, 'start': {'type': 'string'}, 'end': {'type': 'string'}, 'description': {'type': 'string'},
                                 'location': {'type': 'string'}, 'attendees': {'type': 'array', 'items': {'type': 'string'}}, 'calendar_id': {'type': 'string'}},
                                ['summary', 'start', 'end']),
@@ -276,17 +276,20 @@ def handler_for(app):
                 raise Problem(403, 'owner_bearer_refused', 'Bearer credentials cannot open the owner page.')
             if config.dev_mode and host in config.local_hosts:
                 return host
+            # Host/Origin/Tailscale headers alone can all be forged by a local MCP client.
+            # Only the owner-authenticated gateway holds/injects this separate secret;
+            # cookies and CSRF are additional browser controls, not owner authentication.
+            if not config.owner_token:
+                raise Problem(503, 'owner_auth_unconfigured', 'Configure a private gateway owner token before using the owner UI.')
+            supplied = self.headers.get_all('X-Wizard-Owner-Token') or []
+            if len(supplied) != 1 or not hmac.compare_digest(supplied[0], config.owner_token):
+                raise Problem(401, 'owner_token_required', 'Owner-authenticated gateway required.')
             if config.shell_auth == 'tailscale-serve' and host not in config.local_hosts:
                 logins = self.headers.get_all('Tailscale-User-Login') or []
                 if config.owner_logins and len(logins) == 1 and logins[0].strip().lower() in config.owner_logins:
                     return host
                 raise Problem(401, 'owner_login_required', 'Open this app from your Wizard as its owner.')
-            if config.owner_token:
-                supplied = self.headers.get('X-Wizard-Owner-Token', '')
-                if supplied and hmac.compare_digest(supplied, config.owner_token):
-                    return host
-                raise Problem(401, 'owner_token_required', 'Owner gateway token required.')
-            raise Problem(503, 'owner_auth_unconfigured', 'Set WIZARD_OWNER_LOGINS (Tailscale) or WIZARD_OWNER_TOKEN.')
+            return host
 
         def same_origin_write(self, host):
             origin = (self.headers.get('Origin') or '').lower()
@@ -443,12 +446,15 @@ def handler_for(app):
                 match = re.fullmatch(r'/api/(accounts|grants|keys|requests)/([A-Za-z0-9_-]{4,64})/(disconnect|check|revoke|approve|decline)', path)
                 if match:
                     kind, item, action = match.groups()
+                    request = broker.state['requests'].get(item) if kind == 'requests' else None
+                    if request and request.get('kind') == 'write' and set(body) - {'account', 'payload_hash'}:
+                        raise Problem(409, 'payload_changed', 'Approve the displayed packet only; a decision cannot replace its payload.')
                     actions = {('accounts', 'disconnect'): lambda: broker.disconnect(item),
                                ('accounts', 'check'): lambda: broker.check_apis(item),
                                ('grants', 'revoke'): lambda: broker.revoke_grant(item),
                                ('keys', 'revoke'): lambda: broker.revoke_key(item),
-                               ('requests', 'approve'): lambda: broker.decide(item, True, body.get('account')),
-                               ('requests', 'decline'): lambda: broker.decide(item, False)}
+                               ('requests', 'approve'): lambda: broker.decide(item, True, body.get('account'), body.get('payload_hash')),
+                               ('requests', 'decline'): lambda: broker.decide(item, False, payload_hash=body.get('payload_hash'))}
                     if (kind, action) in actions:
                         return self.send_json(200, actions[(kind, action)]())
                 raise Problem(404, 'not_found', 'Not found.')

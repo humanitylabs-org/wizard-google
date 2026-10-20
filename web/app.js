@@ -97,6 +97,12 @@
     if (home.requests.length) {
       view.append(section('Waiting for you', ...home.requests.map(requestCard)));
     }
+    if (home.write_receipts?.length) {
+      const list = el('div', null, 'wz-list');
+      for (const r of home.write_receipts) list.append(row(`${r.label} · ${opLabel(r.operations[0])}`,
+        `${writeOutcome(r)} · ${accountName(r.account)}`, null, '✦'));
+      view.append(section('Recent agent actions', list));
+    }
     if (home.client) {
       const list = el('div', null, 'wz-list');
       for (const a of home.accounts) list.append(row(a.email || a.name || 'Google account', accountLine(a), () => go({ kind: 'account', id: a.id }), initial(a.email)));
@@ -133,19 +139,43 @@
     return card;
   }
   function requestCard(r) {
-    const card = el('div', null, 'wz-card ask');
+    const write = r.kind === 'write';
+    const card = el('div', null, `wz-card ask${write ? ' write-approval' : ''}`, { 'data-request-id': r.id });
     card.append(el('p', `${r.label} wants to: ${r.operations.map(opLabel).join(', ')}`, 'ask-title'),
       el('p', r.account ? `On ${accountName(r.account)}` : 'On an account you choose', 'muted'));
+    if (write) {
+      card.append(el('p', `Just this action · expires ${new Date(r.expires * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`, 'muted'));
+      const details = el('dl', null, 'write-payload');
+      const labels = { to: 'To', cc: 'Cc', subject: 'Subject', body: 'Message', thread_id: 'Reply thread',
+        summary: 'Event', start: 'Starts', end: 'Ends', description: 'Description', location: 'Location', attendees: 'Guests', calendar_id: 'Calendar' };
+      if (r.operations[0] === 'calendar.write' && !r.args.calendar_id) details.append(el('dt', 'Calendar'), el('dd', 'primary'));
+      for (const [key, value] of Object.entries(r.args)) {
+        details.append(el('dt', labels[key] || key), el('dd', Array.isArray(value) ? value.join(', ') : typeof value === 'object' ? JSON.stringify(value) : String(value)));
+      }
+      card.append(details, el('p', 'Nothing happens until you approve. This does not allow future actions.', 'muted'));
+    }
     if (r.reason) card.append(el('p', `“${r.reason}”`, 'reason'));
     const acts = el('div', null, 'actions');
-    acts.append(button('Allow', () => r.account || home.accounts.length === 1 ? decide(r, true, r.account || home.accounts[0].id) : chooseAccountSheet(r)),
-      button('Decline', () => decide(r, false), 'wz-button secondary'));
+    acts.append(button(write ? 'Approve' : 'Allow', () => r.account || home.accounts.length === 1 ? decide(r, true, r.account || home.accounts[0].id) : chooseAccountSheet(r)),
+      button(write ? 'Deny' : 'Decline', () => decide(r, false), 'wz-button secondary'));
     card.append(acts);
     return card;
   }
+  function writeOutcome(r) {
+    return { executed: 'Executed once', declined: 'Denied · nothing sent', expired: 'Expired · nothing sent',
+      executing: 'Executing · do not resubmit', failed: `Not executed: ${r.error?.message || 'Rejected'}`,
+      unknown: 'Outcome unknown · check Google before trying again' }[r.status] || r.status;
+  }
   async function decide(r, yes, account) {
-    try { await api(`api/requests/${r.id}/${yes ? 'approve' : 'decline'}`, yes ? { account } : {}); sheetClose(); say(yes ? 'Allowed.' : 'Declined.', true); await refresh(); }
-    catch (e) { say(e.message); }
+    const buttons = view.querySelectorAll(`[data-request-id="${r.id}"] button`);
+    buttons.forEach(b => { b.disabled = true; });
+    try {
+      const body = yes ? { account } : {};
+      if (r.kind === 'write') body.payload_hash = r.payload_hash;
+      const out = await api(`api/requests/${r.id}/${yes ? 'approve' : 'decline'}`, body);
+      sheetClose(); say(r.kind === 'write' ? writeOutcome(out.request) : yes ? 'Allowed.' : 'Declined.', true); await refresh();
+    } catch (e) { say(e.message); await refresh().catch(() => {}); }
+    finally { buttons.forEach(b => { b.disabled = false; }); }
   }
 
   // ---------- setup ----------
@@ -253,7 +283,7 @@
   function renderCaller(id) {
     const c = home.clients.find(x => x.id === id) || { id, label: id.split(':')[1], kind: id.split(':')[0], grants: [], keys: [] };
     view.append(crumb(c.label));
-    view.append(el('p', c.kind === 'agent' ? 'Tick what this agent may do on each account. It asks you here for anything else.' : 'Tick what this app may do on each account. Wizard makes every Google call for it; the app never sees a Google password or token.', 'intro'));
+    view.append(el('p', c.kind === 'agent' ? 'Tick what this agent may use on each account. Reads run with this grant; every write still asks you to Approve or Deny the exact action here. Agents without their own identity share Main agent grants.' : 'Tick what this app may do on each account. These are standing grants, including writes. Wizard makes every Google call for it; the app never sees a Google password or token.', 'intro'));
     for (const a of home.accounts) {
       const g = c.grants.find(x => x.account === a.id);
       const list = el('div', null, 'wz-list');
@@ -264,7 +294,7 @@
         tog.disabled = !allowedByGoogle && !on;
         const main = el('span', null, 'wz-main'); main.append(el('b', `${op.group}: ${op.label}`));
         if (!allowedByGoogle) main.append(el('small', 'Allow it in Google first (account › Allow more)'));
-        else if (op.writes) main.append(el('small', 'Makes changes'));
+        else if (op.writes) main.append(el('small', c.kind === 'agent' ? 'Asks for approval every time' : 'Makes changes · standing grant'));
         const check = el('span', null, 'wz-check', { 'aria-hidden': 'true' }); check.innerHTML = '<i><svg viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg></i>';
         tog.append(check, main);
         tog.onclick = async () => {
@@ -374,6 +404,20 @@
 
   // ---------- start ----------
   addEventListener('focus', () => { if (csrf && !sheet.open) refresh().catch(() => {}); });
+  // An agent can ask while this screen is already open. Update only changed cards, not a
+  // focused form/sheet; no polling of the write tool itself (which would propose again).
+  let checkingRequests = false;
+  setInterval(async () => {
+    if (!csrf || !home || document.hidden || sheet.open || stack.length || checkingRequests) return;
+    checkingRequests = true;
+    try {
+      const next = await api('api/home');
+      if (!sheet.open && !stack.length && JSON.stringify([home.requests, home.write_receipts]) !== JSON.stringify([next.requests, next.write_receipts])) {
+        home = next; render();
+      }
+    } catch { /* focus or next poll recovers */ }
+    finally { checkingRequests = false; }
+  }, 5000);
   fetch('api/session', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-Wizard-Request': 'bootstrap' }, body: '{}' })
     .then(async r => { const v = await r.json(); if (!r.ok) throw new Error(v.error?.message || 'Unavailable.'); csrf = v.csrf; await refresh(); guardHistory(); })
     .catch(e => { view.replaceChildren(el('div', null, 'wz-empty')); view.firstChild.append(el('strong', 'Google is not available'), el('p', e.message)); });

@@ -20,6 +20,7 @@ from google import OPERATIONS, IDENTITY_SCOPES, GoogleError, BadArgs
 from store import Store
 
 FLOW_TTL = 600
+WRITE_TTL = 15 * 60
 AUDIT_KEEP = 200
 CLIENT = re.compile(r'^(app|agent):[a-z0-9][a-z0-9_-]{0,62}$')
 ACCOUNT = re.compile(r'^g-[0-9a-f]{16}$')
@@ -68,6 +69,16 @@ class Broker:
         self.lock = threading.RLock()
         self.account_locks = {}
         self.flows = {}  # sha(state) -> pending sign-in; memory only, 10 minutes
+        # A process may have died after submitting a write. Never replay a stranded claim.
+        changed = False
+        for request in self.state['requests'].values():
+            if request.get('kind') == 'write' and request['status'] == 'executing':
+                request.update(status='unknown', error={'code': 'outcome_unknown',
+                               'message': 'Execution was interrupted. Check Google before proposing this again.'})
+                request.pop('args', None)
+                changed = True
+        if changed:
+            self._commit(self.state)
 
     # ---------- state ----------
 
@@ -432,7 +443,9 @@ class Broker:
             raise Problem(404, 'account_not_found', 'Account not found.')
         if not isinstance(operations, list) or any(op not in OPERATIONS for op in operations):
             raise Problem(400, 'unknown_operation', 'Unknown operation.')
-        with self.lock:
+        with self._account_lock(account), self.lock:
+            if account not in self.state['accounts']:
+                raise Problem(404, 'account_not_found', 'Account not found.')
             state = self._copy()
             existing = next((g for g in state['grants'].values() if g['client'] == client and g['account'] == account), None)
             if not operations:
@@ -444,7 +457,7 @@ class Broker:
             grant.update(operations=sorted(set(operations)), updated=now())
             state['grants'][grant['id']] = grant
             for request in state['requests'].values():
-                if request['client'] == client and request['status'] == 'pending' and set(request['operations']) <= set(operations) \
+                if request.get('kind') != 'write' and request['client'] == client and request['status'] == 'pending' and set(request['operations']) <= set(operations) \
                         and request.get('account') in (None, account):
                     request.update(status='approved', decided=now())
             self._commit(state)
@@ -452,6 +465,10 @@ class Broker:
 
     def revoke_grant(self, grant_id):
         with self.lock:
+            if grant_id not in self.state['grants']:
+                raise Problem(404, 'grant_not_found', 'Grant not found.')
+            account = self.state['grants'][grant_id]['account']
+        with self._account_lock(account), self.lock:
             if grant_id not in self.state['grants']:
                 raise Problem(404, 'grant_not_found', 'Grant not found.')
             state = self._copy()
@@ -471,27 +488,35 @@ class Broker:
             account = self.find_account(account)
         reason = reason.strip()[:200] if isinstance(reason, str) else ''
         with self.lock:
+            self._expire_writes()
             state = self._copy()
             pending = [r for r in state['requests'].values() if r['status'] == 'pending']
-            same = next((r for r in pending if r['client'] == client and r.get('account') == account and set(r['operations']) == set(operations)), None)
+            same = next((r for r in pending if r.get('kind') != 'write' and r['client'] == client and r.get('account') == account and set(r['operations']) == set(operations)), None)
             if same:
                 return {'request': same}
-            if sum(r['client'] == client for r in pending) >= 5:
+            if sum(r['client'] == client for r in pending) >= 5 or len(pending) >= 100:
                 raise Problem(429, 'too_many_requests', 'This caller already has requests waiting for the owner.')
             request = {'id': new_id('rq'), 'client': client, 'account': account, 'operations': sorted(set(operations)),
                        'reason': reason, 'status': 'pending', 'created': now()}
             state['requests'][request['id']] = request
-            state['requests'] = dict(sorted(state['requests'].items(), key=lambda kv: kv[1]['created'])[-100:])
+            self._trim_requests(state)
             self._commit(state)
         return {'request': request}
 
-    def decide(self, request_id, approve, account=None):
+    def decide(self, request_id, approve, account=None, payload_hash=None):
+        if account is not None and not isinstance(account, str):
+            raise Problem(400, 'account_required', 'Choose a Google account, not a replacement payload.')
         with self.lock:
+            request = self.state['requests'].get(request_id)
+            is_write = request and request.get('kind') == 'write'
+            target = account or (request or {}).get('account')
+        if is_write:
+            return self._decide_write(request_id, approve, account, payload_hash)
+        with self._account_lock(target), self.lock:
             request = self.state['requests'].get(request_id)
             if not request or request['status'] != 'pending':
                 raise Problem(404, 'request_not_found', 'This request is no longer waiting.')
             if approve:
-                target = account or request.get('account')
                 if target not in self.state['accounts']:
                     raise Problem(400, 'account_required', 'Choose which Google account to share.')
                 current = next((g['operations'] for g in self.grants_for(request['client']) if g['account'] == target), [])
@@ -499,7 +524,128 @@ class Broker:
             state = self._copy()
             state['requests'][request_id].update(status='approved' if approve else 'declined', decided=now())
             self._commit(state)
-        return {'request': self.state['requests'][request_id]}
+            return {'request': copy.deepcopy(state['requests'][request_id])}
+
+    # ---------- one-shot agent writes (never an MCP/consumer approval capability) ----------
+
+    @staticmethod
+    def _write_hash(client, account, operation, args):
+        packet = {'client': client, 'account': account, 'operation': operation, 'args': args}
+        return sha(json.dumps(packet, sort_keys=True, separators=(',', ':'), ensure_ascii=True, allow_nan=False))
+
+    @staticmethod
+    def _trim_requests(state):
+        # Never evict a waiting card or an in-flight claim to make room for history.
+        terminal = sorted((r for r in state['requests'].values() if r['status'] not in ('pending', 'executing')),
+                          key=lambda r: r['created'])
+        for r in terminal[:max(0, len(state['requests']) - 100)]:
+            del state['requests'][r['id']]
+
+    def _expire_writes(self):
+        # Caller holds self.lock. Expiry is durable and checked again when Approve is tapped.
+        state = self._copy()
+        changed = False
+        for r in state['requests'].values():
+            if r.get('kind') == 'write' and r['status'] == 'pending' and r['expires'] <= self.clock():
+                r.update(status='expired', decided=int(self.clock()))
+                r.pop('args', None)
+                changed = True
+        if changed:
+            self._commit(state)
+
+    def _request_write(self, client, operation, args, account):
+        try:
+            # Detach mutable caller data; only this frozen JSON is ever shown or executed.
+            encoded = json.dumps(args, sort_keys=True, allow_nan=False)
+            if len(encoded.encode()) > 64_000:
+                raise ValueError
+            args = json.loads(encoded)
+            if operation not in google.WRITE_REVIEW:
+                raise BadArgs('This write has no review schema yet; it cannot execute.')
+            args = google.WRITE_REVIEW[operation](args)
+            digest = self._write_hash(client, account, operation, args)
+            # Typed handlers validate locally before the card exists; this never calls Google.
+            google.HANDLERS[operation](lambda *a, **kw: {}, args)
+        except Exception as bad:
+            raise Problem(400, 'invalid_arguments', str(bad) or 'Invalid write payload.') from None
+        with self.lock:
+            self._expire_writes()
+            state = self._copy()
+            pending = [r for r in state['requests'].values() if r['status'] == 'pending']
+            same = next((r for r in pending if r.get('kind') == 'write' and r['payload_hash'] == digest), None)
+            if same:
+                request = same
+            else:
+                if sum(r['client'] == client for r in pending) >= 5 or len(pending) >= 100:
+                    raise Problem(429, 'too_many_requests', 'Requests are waiting for the owner.')
+                stamp = int(self.clock())
+                request = {'id': new_id('rq'), 'kind': 'write', 'client': client, 'account': account,
+                           'operations': [operation], 'args': args, 'payload_hash': digest,
+                           'status': 'pending', 'created': stamp, 'expires': stamp + WRITE_TTL}
+                state['requests'][request['id']] = request
+                self._trim_requests(state)
+                self._audit(state, client, account, operation, 'approval_pending')
+                self._commit(state)
+            return {'status': 'pending', 'request': copy.deepcopy(request),
+                    'tell_owner': 'Tap Approve or Deny in the Google app. Nothing has been sent.',
+                    'app_link': '/wizard-os-home/?open=wizard-google'}
+
+    def _decide_write(self, request_id, approve, account, payload_hash):
+        with self.lock:
+            request = self.state['requests'].get(request_id)
+            if not request:
+                raise Problem(404, 'request_not_found', 'This request is no longer available.')
+            target = request['account']
+        # Same lock order as disconnect/calls: account then state. Claim survives process death.
+        with self._account_lock(target):
+            with self.lock:
+                self._expire_writes()
+                request = self.state['requests'].get(request_id)
+                if not request:
+                    raise Problem(404, 'request_not_found', 'This request is no longer available.')
+                if request['status'] != 'pending':
+                    raise Problem(409, 'request_' + request['status'], 'This write is no longer waiting. Refresh the Google app.')
+                if account is not None and account != target:
+                    raise Problem(409, 'payload_changed', 'The account does not match the displayed request.')
+                digest = self._write_hash(request['client'], target, request['operations'][0], request['args'])
+                if not isinstance(payload_hash, str) or not hmac.compare_digest(payload_hash, request['payload_hash']) \
+                        or not hmac.compare_digest(digest, request['payload_hash']):
+                    raise Problem(409, 'payload_changed', 'The payload does not match the displayed request. Refresh and review again.')
+                frozen = copy.deepcopy(request)
+                state = self._copy()
+                state['requests'][request_id].update(status='executing' if approve else 'declined', decided=int(self.clock()))
+                # No stored message/event body once consumed. Keep hash and outcome as receipt.
+                state['requests'][request_id].pop('args', None)
+                self._audit(state, request['client'], target, request['operations'][0], 'approval_claimed' if approve else 'approval_denied')
+                self._commit(state)  # fsync + replace BEFORE any provider submission
+                decided = copy.deepcopy(state['requests'][request_id])
+            if approve:
+                try:
+                    result = self._execute(frozen['client'], frozen['operations'][0], frozen['args'], target)
+                except Problem as problem:
+                    # Definitive local/provider rejection is failed; ambiguous network/5xx is unknown.
+                    decided = self._finish_write(request_id, 'unknown' if problem.status >= 500 else 'failed', error=problem.as_dict())
+                except Exception:
+                    decided = self._finish_write(request_id, 'unknown', error={'code': 'outcome_unknown',
+                                       'message': 'Check Google before proposing this again. The request will not be retried.'})
+                else:
+                    decided = self._finish_write(request_id, 'executed', result=result)
+        return {'request': decided}
+
+    def _finish_write(self, request_id, status, **receipt):
+        if 'result' in receipt:
+            result = receipt['result']
+            # Keep identifiers as receipts, not another copy of message/event content.
+            receipt['result'] = {k: result[k] for k in ('account', 'id', 'thread_id', 'sent', 'created') if k in result}
+            if isinstance(result.get('event'), dict):
+                receipt['result']['event'] = {k: result['event'][k] for k in ('id', 'link') if k in result['event']}
+        with self.lock:
+            state = self._copy()
+            request = state['requests'][request_id]
+            request.update(status=status, finished=int(self.clock()), **receipt)
+            self._audit(state, request['client'], request['account'], request['operations'][0], status)
+            self._commit(state)
+            return copy.deepcopy(request)
 
     # ---------- app access keys (apps installed before Wizard grants exist) ----------
 
@@ -555,7 +701,20 @@ class Broker:
             self._record(client, account, operation, 'denied')
             raise Problem(403, 'grant_required', 'The owner has not allowed this for that account. Ask with google_request_access.')
         spec = OPERATIONS[operation]
+        if spec['writes'] and client.startswith('agent:'):
+            if spec['scope'] not in self.state['accounts'][account]['scopes']:
+                raise Problem(403, 'google_permission_missing', 'Allow this in Google first.')
+            return self._request_write(client, operation, args, account)
+        return self._execute(client, operation, args, account)
+
+    def _execute(self, client, operation, args, account):
+        """Private executor: only standing app grants or a durably consumed owner approval."""
+        spec = OPERATIONS[operation]
         with self._account_lock(account):
+            if account not in self.state['accounts']:
+                raise Problem(404, 'account_not_found', 'Account disconnected before execution.')
+            if account not in self.allowed(client, operation):
+                raise Problem(403, 'grant_required', 'The owner revoked access before execution.')
             if spec['scope'] not in self.state['accounts'][account]['scopes']:
                 raise Problem(403, 'google_permission_missing', 'Google has not been allowed this for the account yet. The owner can add it in the Google app.')
             token = self._token(account)
@@ -610,10 +769,14 @@ class Broker:
                 for c in sorted(known, key=lambda c: (c != 'agent:main', c))]
 
     def home(self, origin, shell_path, session=None):
+        with self.lock:
+            self._expire_writes()
         return {'setup': self.setup_plan(origin, shell_path), 'client': self.client_summary(),
                 'accounts': [self.account_view(a) for a in self.state['accounts']],
                 'clients': self.clients(),
                 'requests': [{**r, 'label': client_label(r['client'])} for r in self.state['requests'].values() if r['status'] == 'pending'],
+                'write_receipts': [{**r, 'label': client_label(r['client'])} for r in self.state['requests'].values()
+                                   if r.get('kind') == 'write' and r['status'] != 'pending'][-5:][::-1],
                 'operations': self.operations(), 'apis': google.APIS,
                 'signin': self.flow_status(session) if session else {'status': 'none'},
                 'audit': self.state['audit'][-30:][::-1]}
@@ -635,10 +798,13 @@ class Broker:
                 'error': error}
 
     def caller_status(self, client):
+        with self.lock:
+            self._expire_writes()
         grants = self.grants_for(client)
         return {'caller': client, 'setup_complete': bool(self.state['client']) and bool(self.state['accounts']),
                 'accounts': [{'id': a['id'], 'email': a['email'], 'status': a['status'],
                               'operations': next((g['operations'] for g in grants if g['account'] == a['id']), [])}
                              for a in self.state['accounts'].values()],
                 'operations': {op: spec['label'] for op, spec in OPERATIONS.items()},
-                'waiting': [r for r in self.state['requests'].values() if r['client'] == client and r['status'] == 'pending']}
+                'waiting': [copy.deepcopy(r) for r in self.state['requests'].values() if r['client'] == client and r['status'] == 'pending'],
+                'write_requests': [copy.deepcopy(r) for r in self.state['requests'].values() if r['client'] == client and r.get('kind') == 'write'][-20:]}

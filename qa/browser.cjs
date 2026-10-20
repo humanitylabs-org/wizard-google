@@ -113,6 +113,63 @@ const shot = (page, name) => page.screenshot({ path: path.join(shots, name + '.p
     ok('first Back at root warns and stays', page.url() === 'http://127.0.0.1:18893/' && await page.$('.wz-card.ask') !== null);
     await shot(page, '11-standalone-back-at-root');
 
+    // ---- 5. Agent writes: exact payload cards, two skins, one tap and no replay ----
+    procs.push(await preview('approval', 18894));
+    const mobile = await browser.newContext({ ...pw.devices['Pixel 7'] });
+    page = await mobile.newPage();
+    app = await hosted(page, 18894, 'nebula');
+    const writes = async () => (await page.request.get('http://127.0.0.1:18894/__qa/writes')).json();
+    ok('pending agent writes do not call either fake Google mutation', JSON.stringify(await writes()) === JSON.stringify({ sent: 0, calendar_posts: 0 }));
+    ok('approval QA uses mobile-UA/touch and actual phone-width frame',
+      await app.evaluate(width => navigator.maxTouchPoints > 0 && innerWidth === width, pw.devices['Pixel 7'].viewport.width));
+    const mail = app.locator('.write-approval').filter({ hasText: 'Thursday lunch' });
+    const calendar = app.locator('.write-approval').filter({ hasText: 'Lunch with Anna' });
+    await mail.waitFor();
+    ok('card includes exact account, recipient, subject and complete message',
+      /sam@gmail.com/.test(await mail.textContent()) && /anna@example.com/.test(await mail.textContent()) &&
+      /Does noon on Thursday work for lunch\?/.test(await mail.textContent()));
+    const originalRequest = await mail.getAttribute('data-request-id');
+    await app.evaluate(() => { window.__approvalDocument = 'same'; });
+    for (const skin of ['nebula', 'ember']) {
+      if (skin !== 'nebula') {
+        await page.evaluate(s => { window.reskin(s); document.body.style.background = s.backdrop; }, { name: skin, ...skins[skin] });
+        await app.waitForFunction(() => document.documentElement.dataset.skin === 'ember');
+      }
+      await mail.scrollIntoViewIfNeeded();
+      await shot(page, `12-agent-send-approval-${skin}`);
+      await calendar.scrollIntoViewIfNeeded();
+      await shot(page, `13-agent-calendar-approval-${skin}`);
+    }
+    ok('pending cards survive live skin change without navigation or payload substitution',
+      await app.evaluate(() => window.__approvalDocument) === 'same' && await mail.getAttribute('data-request-id') === originalRequest);
+    await mail.getByRole('button', { name: 'Approve', exact: true }).click();
+    await mail.waitFor({ state: 'detached' });
+    ok('one owner tap sends once and displays an executed receipt', (await writes()).sent === 1 &&
+      /Executed once/.test(await app.textContent('#view')));
+    await calendar.getByRole('button', { name: 'Deny', exact: true }).click();
+    await calendar.waitFor({ state: 'detached' });
+    ok('one owner tap denies the event and creates nothing', (await writes()).calendar_posts === 0 &&
+      /Denied · nothing sent/.test(await app.textContent('#view')));
+    await page.reload();
+    app = page.frame({ url: /:\d+\/$/ });
+    await app.waitForSelector('.wz-sec');
+    ok('reload does not replay an approved action', (await writes()).sent === 1 && await app.locator('.write-approval').count() === 0);
+    // A fresh MCP proposal while the owner screen is already open appears via read-only polling.
+    const agentHttp = await pw.request.newContext(); // MCP must never receive the owner's browser cookie
+    const incoming = await (await agentHttp.post('http://127.0.0.1:18894/mcp', { data: {
+      jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'google_gmail_send', arguments: {
+        to: ['anna@example.com'], subject: 'Another exact proposal', body: '<script>not HTML</script>' } } } })).json();
+    assert.equal(incoming.result.structuredContent.status, 'pending');
+    await agentHttp.dispose();
+    const freshCard = app.locator('.write-approval').filter({ hasText: 'Another exact proposal' });
+    await freshCard.waitFor({ timeout: 10000 });
+    ok('already-open home receives a new card without another write invocation', (await writes()).sent === 1);
+    ok('agent-provided content is rendered as text, never HTML', await freshCard.locator('script').count() === 0 &&
+      (await freshCard.textContent()).includes('<script>not HTML</script>'));
+    await freshCard.scrollIntoViewIfNeeded();
+    await shot(page, '14-new-proposal-after-approval');
+    await mobile.close();
+
     console.log(JSON.stringify({ pass: checks.length, checks, shots }, null, 1));
   } finally {
     await browser.close();

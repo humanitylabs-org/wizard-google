@@ -11,14 +11,18 @@ The Google app holds the owner's Google sign-ins on this box. You never see a to
 1. Call `google_status` first. It lists the connected accounts and, for each one, the operations **you** may use.
 2. If the operation you need is not listed for any account, call `google_request_access` with the operations (and the account email if the owner named one) plus one short reason the owner will see. Then tell the owner in one sentence: "I've asked for access; tap Allow in the Google app." Never retry in a loop.
 3. Call the operation tool. Pass `account` (an email) when more than one account is allowed for that operation.
+4. **Every write needs a fresh owner tap**, even when the operation is listed as granted. `google_gmail_send` and `google_calendar_create` return `status: pending` plus an immutable `request` (ID, account, payload hash and 15-minute expiry). Say: "It's waiting for your approval in the Google app; nothing has been sent." The owner taps **Approve** or **Deny** there. You cannot approve it through MCP or chat. Never claim sent/created from a pending response.
+5. To inspect the outcome, call `google_status` and find that exact ID in `write_requests`. **Do not call the write tool again to check status**: after consumption it proposes another action needing another tap. `executed` includes the Google result; `declined`/`expired` did nothing; `failed` was rejected; `unknown` may have been sent—check Google, never blindly retry. Changing recipients, text, event details or account creates a different packet and needs its own approval.
+
+Until the Agent Service sends `X-Wizard-Agent`, all agents use `agent:main` and share **Main agent** grants. A supplied agent identity gets separate grants. Do not pretend chat names isolate authority. Apps use their own standing grants, including writes; this agent skill cannot take an app identity to avoid approval.
 
 | Tool | Operation | Notes |
 |---|---|---|
 | `google_gmail_search` | gmail.search | Gmail search syntax in `query` (`from:anna newer_than:7d`). Sender, subject, date, preview only. |
 | `google_gmail_read` | gmail.read | One message as plain text, by `id` from a search. |
-| `google_gmail_send` | gmail.send | Only an email the owner asked for, with the recipients and text they approved in chat. |
+| `google_gmail_send` | gmail.send | Proposes the exact email; owner approves in the Google app before sending. Chat assent is not execution approval. |
 | `google_calendar_events` | calendar.read | `time_min`/`time_max` as RFC 3339 (`2026-10-21T00:00:00Z`). |
-| `google_calendar_create` | calendar.write | `summary`, `start`, `end` (date or RFC 3339). Confirm details with the owner first. |
+| `google_calendar_create` | calendar.write | `summary`, `start`, `end` (date or RFC 3339). Owner approves the exact event in the Google app before creation. |
 | `google_drive_search` | drive.search | File names, types and links. |
 | `google_drive_read` | drive.read | Docs, Sheets (CSV), Slides and text files as text. |
 | `google_contacts_search` | contacts.read | Name or email in `query`. |

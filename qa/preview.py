@@ -55,16 +55,28 @@ def seed(app, scenario):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--port', type=int, default=18890)
-    parser.add_argument('--scenario', default='connected', choices=['fresh', 'paste', 'connected'])
+    parser.add_argument('--scenario', default='connected', choices=['fresh', 'paste', 'connected', 'approval'])
     args = parser.parse_args()
     config = server.Config({'PORT': str(args.port), 'DATA_DIR': tempfile.mkdtemp(prefix='wizard-google-qa-'),
                             'GOOGLE_DEV_MODE': 'loopback-single-owner', 'WIZARD_SHELL_PATH': '/'})
     app = server.App(config, transport=FakeGoogle())
     seed(app, args.scenario)
+    if args.scenario == 'approval':
+        broker = app.broker
+        account = next(a['id'] for a in broker.state['accounts'].values() if a['email'] == 'sam@gmail.com')
+        broker.set_grant('agent:main', account, ['gmail.search', 'gmail.read', 'calendar.read', 'gmail.send', 'calendar.write'])
+        broker.call('agent:main', 'gmail.send', {'to': ['anna@example.com'], 'subject': 'Thursday lunch',
+                    'body': 'Hi Anna,\n\nDoes noon on Thursday work for lunch?\n\nSam'}, account)
+        broker.call('agent:main', 'calendar.write', {'summary': 'Lunch with Anna', 'start': '2026-10-22T12:00:00Z',
+                    'end': '2026-10-22T13:00:00Z', 'location': 'Corner cafe', 'attendees': ['anna@example.com']}, account)
     base = server.handler_for(app)
 
     class Handler(base):
         def do_GET(self):
+            if self.path == '/__qa/writes':
+                # Read-only fixture evidence; only in this loopback QA server, never packaged.
+                return self.send_json(200, {'sent': len(app.broker.transport.sent),
+                                           'calendar_posts': sum(m == 'POST' and '/calendar/' in u for m, u in app.broker.transport.calls)})
             if self.path.startswith('/__qa/host.html'):
                 name = self.path.partition('skin=')[2] or 'nebula'
                 skin = TOKENS[name]

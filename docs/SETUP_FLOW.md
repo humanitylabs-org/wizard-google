@@ -40,9 +40,9 @@ Partly, and we chose not to:
 
 ## The return address (redirect URI)
 
-1. **Default: the box's own https address**, `https://<box>.<tailnet>.ts.net/wizard-google/oauth/callback`. `ts.net` is on the Public Suffix List, so Google accepts it as a redirect host; Google never fetches the redirect itself (it's a browser redirect), so a tailnet-only address works for the owner's devices. Nothing leaves the box except the call to Google.
-2. **Optional: a stateless shared return page** (`relay/`, e.g. `https://www.aiwizards.com/wizard-google/auth/callback`) for a box without its own https address. It has no storage, logs or outbound calls; it shows "Return to your Wizard at <host>" and the owner clicks. It sees the code but cannot use it: the exchange needs the owner's **client secret** and the box's **PKCE verifier**, which only the box holds. Off unless `GOOGLE_RELAY_CALLBACK` is set; **not deployed**.
-3. A box move to a new address only affects *new* sign-ins: existing refresh tokens don't use the redirect. The setup screen shows the new address to add to the client.
+**The box's own HTTPS address is the only supported redirect route**, `https://<box>.<tailnet>.ts.net/wizard-google/oauth/callback`. Google never fetches the redirect itself (it's a browser redirect), so a tailnet-only address works for the owner's devices. Nothing leaves the box except the call to Google. The real Google acceptance of the exact hostname/authorized domain still needs a real-client check; the prototype's tests use a labelled fake Google.
+
+A box move to a new address only affects *new* sign-ins: existing refresh tokens don't use the redirect. The setup screen shows the new address to add to the client. There is no AI Wizards-hosted return page to configure or deploy.
 
 ## Things Google may show the owner
 

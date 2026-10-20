@@ -186,6 +186,47 @@ class LoopbackOwner(unittest.TestCase):
         self.assertEqual(Client(self.port).send('GET', '/../app/server.py', browser=False)[0], 404)
 
 
+    def test_7_agent_write_is_pending_only_owner_can_decide_apps_keep_grants(self):
+        self.app.broker.save_client(CLIENT_JSON)
+        account = self.connect('write-test', 'write@example.com', ['gmail.send'])
+        for client in ('agent:main', 'agent:research', 'app:planner'):
+            self.app.broker.set_grant(client, account, ['gmail.send'])
+        args = {'account': account, 'to': ['anna@example.com'], 'subject': 'Test', 'body': 'Exact approved text'}
+        agent = Client(self.port)
+        pending = agent.mcp('google_gmail_send', args)
+        self.assertEqual('pending', pending['status'])
+        r = pending['request']
+        self.assertEqual('agent:main', r['client'])
+        self.assertEqual([], self.fake.sent)
+        named = agent.mcp('google_gmail_send', args, {'X-Wizard-Agent': 'research'})['request']
+        self.assertEqual('agent:research', named['client'])
+        self.assertNotEqual(r['id'], named['id'])
+        route = f"/api/requests/{r['id']}/approve"
+        body = {'payload_hash': r['payload_hash']}
+        self.assertEqual(403, agent.send('POST', route, body, browser=False)[0])
+        self.assertEqual(403, self.owner.send('POST', route, body, {'X-CSRF-Token': ''})[0])
+        self.assertEqual(403, self.owner.send('POST', route, body, {'Origin': 'https://evil.example'})[0])
+        self.assertEqual(-32602, agent.send('POST', '/mcp', {'jsonrpc': '2.0', 'id': 7, 'method': 'tools/call',
+                           'params': {'name': 'google_approve', 'arguments': {'id': r['id']}}}, browser=False)[1]['error']['code'])
+        self.assertEqual(409, self.owner.send('POST', route, dict(body, args=dict(args, body='swapped')))[0])
+        self.assertEqual([], self.fake.sent)
+        status, out, _ = self.owner.send('POST', route, dict(body, account=account))
+        self.assertEqual(200, status)
+        self.assertEqual('executed', out['request']['status'])
+        self.assertEqual(1, len(self.fake.sent))
+        self.assertEqual(409, self.owner.send('POST', route, body)[0])
+        self.assertEqual('executed', agent.mcp('google_status')['write_requests'][0]['status'])
+        made = self.owner.send('POST', '/api/keys', {'client': 'app:planner'})[1]
+        headers = {'Authorization': 'Bearer ' + made['key']}
+        self.assertEqual(404, agent.send('POST', '/consumer/v1/requests/' + r['id'] + '/approve', body, headers, browser=False)[0])
+        status, sent, _ = agent.send('POST', '/consumer/v1/call', {'operation': 'gmail.send', 'account': account,
+                                                                   'args': {k: v for k, v in args.items() if k != 'account'}}, headers, browser=False)
+        self.assertEqual(200, status)
+        self.assertEqual('sent1', sent['id'])
+        self.assertEqual(2, len(self.fake.sent))
+        self.assertFalse(any(x['client'] == 'app:planner' for x in self.app.broker.state['requests'].values()))
+
+
 class ShellOwner(unittest.TestCase):
     """Inside the Wizard shell: Tailscale Serve names the signed-in user; only the configured owner gets in."""
 
@@ -193,6 +234,7 @@ class ShellOwner(unittest.TestCase):
     def setUpClass(cls):
         cls.dir = tempfile.mkdtemp()
         cls.srv, cls.app, cls.fake = start({'PORT': '0', 'DATA_DIR': cls.dir, 'WIZARD_SHELL_AUTH': 'tailscale-serve',
+                                            'WIZARD_OWNER_TOKEN': 'fixture-owner-gateway-only',
                                             'WIZARD_OWNER_LOGINS': 'owner@example.com', 'WIZARD_TRUSTED_HOSTS': 'box.tail1234.ts.net',
                                             'WIZARD_TRUSTED_ORIGINS': 'https://box.tail1234.ts.net'})
         cls.port = cls.srv.server_address[1]
@@ -207,10 +249,11 @@ class ShellOwner(unittest.TestCase):
         status, _, _ = stranger.send('POST', '/api/session', {}, {'X-Wizard-Request': 'bootstrap', 'Tailscale-User-Login': 'guest@example.com'})
         self.assertEqual(status, 401)
         owner = Client(self.port, 'box.tail1234.ts.net', 'https://box.tail1234.ts.net')
-        cookie = owner.bootstrap({'Tailscale-User-Login': 'owner@example.com'})
+        gateway = {'X-Wizard-Owner-Token': 'fixture-owner-gateway-only', 'Tailscale-User-Login': 'owner@example.com'}
+        cookie = owner.bootstrap(gateway)
         self.assertIn('Path=/wizard-google/', cookie)
         self.assertIn('Secure', cookie)
-        status, home, _ = owner.send('GET', '/api/home', headers={'Tailscale-User-Login': 'owner@example.com'})
+        status, home, _ = owner.send('GET', '/api/home', headers=gateway)
         self.assertEqual(status, 200)
         client_step = next(s for s in home['setup']['steps'] if s['id'] == 'client')
         self.assertEqual(client_step['copy'][0]['value'], 'https://box.tail1234.ts.net/wizard-google/oauth/callback')
@@ -219,12 +262,53 @@ class ShellOwner(unittest.TestCase):
         conn = http.client.HTTPConnection('127.0.0.1', self.port)
         conn.putrequest('GET', '/api/home', skip_host=True)
         conn.putheader('Host', 'box.tail1234.ts.net')
+        conn.putheader('X-Wizard-Owner-Token', 'fixture-owner-gateway-only')
         conn.putheader('Tailscale-User-Login', 'owner@example.com')
         conn.putheader('Tailscale-User-Login', 'guest@example.com')
         conn.putheader('Cookie', owner.cookie)
         conn.endheaders()
         self.assertEqual(conn.getresponse().status, 401)
         conn.close()
+
+    def test_local_agent_cannot_forge_owner_identity_to_bootstrap_or_approve(self):
+        forged = Client(self.port, 'box.tail1234.ts.net', 'https://box.tail1234.ts.net')
+        headers = {'X-Wizard-Request': 'bootstrap', 'Tailscale-User-Login': 'owner@example.com',
+                   'Sec-Fetch-Site': 'same-origin'}
+        status, out, _ = forged.send('POST', '/api/session', {}, headers)
+        self.assertEqual(401, status)
+        self.assertEqual('owner_token_required', out['error']['code'])
+        headers['X-Wizard-Owner-Token'] = 'wrong-fixture-token'
+        self.assertEqual(401, forged.send('POST', '/api/session', {}, headers)[0])
+        headers.pop('X-Wizard-Owner-Token')
+        self.assertEqual(401, forged.send('POST', '/api/requests/rq_forged/approve', {'payload_hash': '0' * 64}, headers)[0])
+        original = self.app.config.owner_token
+        try:
+            self.app.config.owner_token = ''
+            self.assertEqual(503, forged.send('POST', '/api/session', {}, headers)[0])
+        finally:
+            self.app.config.owner_token = original
+
+    def test_production_owner_gateway_can_approve_once_without_exposing_its_token(self):
+        from fakes import sign_in
+        broker = self.app.broker
+        broker.save_client(CLIENT_JSON)
+        account = sign_in(broker, self.fake, 'prod-seed', '333', 'work@example.com', ['gmail.send'])[0]['account']
+        broker.set_grant('agent:main', account, ['gmail.send'])
+        r = broker.call('agent:main', 'gmail.send', {'to': ['anna@example.com'], 'subject': 'Production guard', 'body': 'Exact content'}, account)['request']
+        owner = Client(self.port, 'box.tail1234.ts.net', 'https://box.tail1234.ts.net')
+        gateway = {'X-Wizard-Owner-Token': 'fixture-owner-gateway-only', 'Tailscale-User-Login': 'owner@example.com'}
+        owner.bootstrap(gateway)
+        route = f"/api/requests/{r['id']}/approve"
+        # Even a valid UI cookie/CSRF pair is not authority on the direct listener.
+        self.assertEqual(401, owner.send('POST', route, {'payload_hash': r['payload_hash']},
+                                         {'Tailscale-User-Login': 'owner@example.com'})[0])
+        self.assertEqual([], self.fake.sent)
+        code, out, _ = owner.send('POST', route, {'payload_hash': r['payload_hash']}, gateway)
+        self.assertEqual(200, code)
+        self.assertEqual('executed', out['request']['status'])
+        self.assertEqual(1, len(self.fake.sent))
+        self.assertNotIn('fixture-owner-gateway-only', json.dumps(out))
+        self.assertEqual(409, owner.send('POST', route, {'payload_hash': r['payload_hash']}, gateway)[0])
 
 
 if __name__ == '__main__':

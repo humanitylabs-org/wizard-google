@@ -359,6 +359,46 @@ def calendar_create(call, args):
     return {'created': True, 'event': _event(created)}
 
 
+# ---------- Canonical agent review packets (apps retain their existing argument contract) ----------
+
+def _review_addresses(value, name):
+    result = addresses(value, name)
+    # Review the bare envelope addresses, never a potentially misleading display name.
+    # Deliberately exclude EAI/control/bidi addresses in this prototype's agent lane.
+    pattern = r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+"
+    if any(not re.fullmatch(pattern, a) for a in result):
+        raise BadArgs(f'{name} needs ordinary ASCII email addresses.')
+    return result
+
+
+def review_gmail(args):
+    if set(args) - {'to', 'cc', 'subject', 'body', 'thread_id'}:
+        raise BadArgs('Unknown mail fields are not allowed in an approval packet.')
+    result = {'to': _review_addresses(args.get('to'), 'to'), 'subject': text(args, 'subject', 300),
+              'body': text(args, 'body', 50_000)}
+    if 'cc' in args:
+        result['cc'] = _review_addresses(args['cc'], 'cc')
+    if 'thread_id' in args:
+        result['thread_id'] = ident(args, 'thread_id', r'[A-Za-z0-9]{1,64}')
+    return result
+
+
+def review_calendar(args):
+    if set(args) - {'calendar_id', 'summary', 'start', 'end', 'description', 'location', 'attendees'}:
+        raise BadArgs('Unknown event fields are not allowed in an approval packet.')
+    result = {'calendar_id': ident({'c': args.get('calendar_id') or 'primary'}, 'c', r'[A-Za-z0-9_@.#-]{1,256}'),
+              'summary': text(args, 'summary', 300), 'start': args.get('start'), 'end': args.get('end')}
+    for field, maximum in (('description', 8000), ('location', 300)):
+        if args.get(field):
+            result[field] = text(args, field, maximum)
+    if 'attendees' in args:
+        result['attendees'] = _review_addresses(args['attendees'], 'attendees')
+    return result
+
+
+WRITE_REVIEW = {'gmail.send': review_gmail, 'calendar.write': review_calendar}
+
+
 # ---------- Drive ----------
 
 DRIVE_FIELDS = 'id,name,mimeType,modifiedTime,size,webViewLink,owners(emailAddress)'

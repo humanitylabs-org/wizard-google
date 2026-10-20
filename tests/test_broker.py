@@ -222,7 +222,9 @@ class Grants(Base):
 
     def test_send_builds_a_clean_message(self):
         self.broker.set_grant('agent:main', self.work, ['gmail.send'])
-        self.broker.call('agent:main', 'gmail.send', {'to': ['anna@example.com'], 'subject': 'Hi', 'body': 'See you.'})
+        proposed = self.broker.call('agent:main', 'gmail.send', {'to': ['anna@example.com'], 'subject': 'Hi', 'body': 'See you.'})['request']
+        self.assertEqual([], self.fake.sent)
+        self.broker.decide(proposed['id'], True, payload_hash=proposed['payload_hash'])
         sub, raw = self.fake.sent[0]
         self.assertEqual(sub, '222')
         self.assertIn('To: anna@example.com', raw)
