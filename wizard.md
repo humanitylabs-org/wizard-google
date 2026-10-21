@@ -6,7 +6,7 @@ type: external
 category: system
 version: 0.1.0
 summary: Your Google accounts on your own Google client. Apps and agents get only the operations you allow.
-license: GPL-3.0-only
+license: MIT
 source: https://github.com/humanitylabs-org/wizard-google
 icon: icon.png
 runtime:
