@@ -3,8 +3,11 @@
 # No named volumes (backups skip those). The page, apps and agents never receive a Google token.
 services:
   wizard-google:
-    image: ${GOOGLE_IMAGE:-ghcr.io/humanitylabs-org/wizard-google:0.1.0}
-    user: "1000:1000"
+    build:
+      context: .
+      dockerfile: app/Dockerfile
+    # A fresh App Manager data bind is root-owned; retain the sandbox below.
+    user: "0:0"
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]

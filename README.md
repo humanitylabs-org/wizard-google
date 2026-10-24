@@ -63,3 +63,23 @@ Runtime: Python 3.12 standard library + `cryptography`. UI: plain DOM on the Wiz
 Proven here, with a labelled fake Google: every broker path (setup validation, sign-in, partial consent, reconnect, refresh/rotation, expiry, Testing detection, API-disabled errors, grants, requests, keys, disconnect, custody, data-folder move), HTTP guards, MCP and the consumer API, the relay page, and the UI in a real browser on several skins with Back.
 
 Needs a real Google test client (see the report for the list): the console deep links landing on the right pages, the ts.net redirect URI and authorized-domain acceptance, the real consent round trip and the unverified-app screen, `refresh_token_expires_in` on a Testing app, `include_granted_scopes` scope reporting, real Gmail/Calendar/Drive/People/YouTube responses, and revocation.
+
+## Runtime packaging
+
+`runtime.package: build` builds `app/Dockerfile` from the App Manager's pinned
+repository. Cryptography and cffi require native wheels, so they are not vendored
+as source. `requirements.txt` remains the dependency input; `requirements.lock`
+pins the complete resolution and hashes, including musllinux x86_64 and aarch64
+wheels for Python 3.12. Installation uses `--require-hashes --only-binary=:all:`
+to refuse source compilation or unhashed artifacts. Regenerate with:
+
+```sh
+uv pip compile requirements.txt --generate-hashes --universal --python-version 3.12 --no-header -o requirements.lock
+```
+
+The official Python Alpine base is pinned by its multi-architecture index digest.
+There is no compose `image:` override: App Manager names the local image. The
+compose runs as root with the existing capability/security restrictions so a
+fresh root-owned `/data` bind works; all persistent state still uses that bind,
+and application-enforced private file permissions and encryption are unchanged.
+Requires an App Manager release containing wizard-app-manager#153.
