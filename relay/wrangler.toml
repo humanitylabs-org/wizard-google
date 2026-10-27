@@ -1,4 +1,4 @@
-# Not deployed. Deploying this page is a separate owner decision (see REPORT open questions).
+# Deployed route-only on www.aiwizards.com/wizard-google/auth/*. Secrets: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET (wrangler secret put).
 name = "wizard-google-auth"
 main = "worker.mjs"
 compatibility_date = "2026-10-01"

@@ -43,7 +43,10 @@ class FakeGoogle:
         self.testing = False  # Testing-mode apps get 7-day refresh tokens
 
     def issue(self, code, sub, email, scopes):
-        self.codes[code] = (sub, email, scopes)
+        # Like Google with include_granted_scopes: a returning account gets everything granted so far.
+        self.granted = getattr(self, 'granted', {})
+        self.granted[sub] = sorted(set(self.granted.get(sub, [])) | set(scopes))
+        self.codes[code] = (sub, email, self.granted[sub])
 
     def _token(self, sub, scopes):
         self.counter += 1
@@ -67,7 +70,7 @@ class FakeGoogle:
                 nonce = self.nonce_for(form)
                 extra = {'refresh_token_expires_in': 604799} if self.testing else {}
                 return {**extra, 'token_type': 'Bearer', 'access_token': self._token(sub, scopes), 'expires_in': 3599, 'refresh_token': refresh,
-                        'scope': ' '.join(scopes), 'id_token': id_token({'iss': 'https://accounts.google.com', 'aud': CLIENT_ID, 'azp': CLIENT_ID,
+                        'scope': ' '.join(scopes), 'id_token': id_token({'iss': 'https://accounts.google.com', 'aud': form['client_id'], 'azp': form['client_id'],
                                                                           'sub': sub, 'email': email, 'email_verified': True, 'name': email.split('@')[0].title(),
                                                                           'exp': time.time() + 3600, 'iat': time.time(), 'nonce': nonce})}
             if form['grant_type'] == 'refresh_token':
@@ -128,3 +131,57 @@ def sign_in(broker, fake, session, sub, email, operations=(), account=None, orig
     code = f'code-{sub}-{len(fake.codes)}-{time.time()}'
     fake.issue(code, sub, email, sorted(grant if grant is not None else set(query['scope'].split())))
     return broker.finish(query['state'], session, code), query
+
+
+SERVICE = 'https://signin.example/wizard-google/auth'
+SHARED_ID = '999999999999-sharedwizardclient.apps.googleusercontent.com'
+SHARED_SECRET = 'fake-shared-secret-held-by-the-service'
+
+
+class FakeSigninService:
+    """The stateless sign-in service (relay/worker.mjs) in front of the fake Google: it adds the shared secret.
+
+    Records every form a box sent, so tests can prove the box never holds or sends the shared secret."""
+
+    def __init__(self, google_fake, available=True):
+        self.google = google_fake
+        self.available = available
+        self.forms = []
+        google_fake.clients[SHARED_ID] = SHARED_SECRET
+
+    def request(self, method, url, *, token=None, form=None, body=None, raw=False):
+        if url == SERVICE + '/v1/client':
+            if not self.available:
+                raise classify(503, {'error': 'not_configured'})
+            return {'client_id': SHARED_ID, 'redirect_uri': SERVICE + '/callback', 'name': 'Wizard', 'verified': False}
+        if url == SERVICE + '/v1/token':
+            self.forms.append(dict(form))
+            if form.get('client_id') != SHARED_ID or 'client_secret' in form:
+                raise classify(400, {'error': 'invalid_request'})
+            if form['grant_type'] == 'authorization_code' and (form.get('redirect_uri') != SERVICE + '/callback' or not form.get('code_verifier')):
+                raise classify(400, {'error': 'invalid_request'})
+            return self.google.request('POST', google.TOKEN_URL, form={**form, 'client_secret': SHARED_SECRET})
+        if url.startswith('https://oauth2.googleapis.com/token'):
+            raise AssertionError('In Wizard mode the box must not call Google\'s token endpoint itself.')
+        return self.google.request(method, url, token=token, form=form, body=body, raw=raw)
+
+
+class FakeGog:
+    """Stands in for gogcli: real argument checks (gogrun.check_args), canned output, records what ran."""
+
+    def __init__(self):
+        import gogrun
+        self.real = gogrun
+        self.ALIASES, self.RunProblem, self.check_args = gogrun.ALIASES, gogrun.RunProblem, gogrun.check_args
+        self.runs = []
+        self.exit_codes = []
+
+    def run(self, args, token, roots, **kw):
+        root = self.check_args(args, roots)
+        self.runs.append({'args': list(args), 'token': token, 'roots': sorted(roots)})
+        code = self.exit_codes.pop(0) if self.exit_codes else 0
+        return {'command': root, 'exit_code': code, 'output': {'ran': args, 'token_was_given': bool(token)} if code == 0 else {'error': {'code': code}},
+                'stderr': '', 'truncated': False}
+
+    def help_for(self, path, roots, **kw):
+        return {'commands': sorted(roots)} if not path else {'schema': {'command': path}}

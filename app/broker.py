@@ -16,10 +16,12 @@ import urllib.parse
 
 import google
 import setup_flow
-from google import OPERATIONS, IDENTITY_SCOPES, GoogleError, BadArgs
+import gogrun
+from google import OPERATIONS, IDENTITY_SCOPES, SERVICES, GoogleError, BadArgs
 from store import Store
 
 FLOW_TTL = 600
+SIGNIN_CACHE = 600
 AUDIT_KEEP = 200
 CLIENT = re.compile(r'^(app|agent):[a-z0-9][a-z0-9_-]{0,62}$')
 ACCOUNT = re.compile(r'^g-[0-9a-f]{16}$')
@@ -59,11 +61,18 @@ def client_label(client):
 
 
 class Broker:
-    def __init__(self, data_dir, *, transport=None, store_key=None, relay_callback='', clock=time.time):
+    def __init__(self, data_dir, *, transport=None, store_key=None, relay_callback='', signin_service='', clock=time.time,
+                 gog=None):
         self.store = Store(data_dir, store_key)
         self.state = self.store.load()
-        self.transport = transport or google.Transport()
+        # Wizard's Google app: a stateless sign-in service holds the shared client's secret and the
+        # fixed return page. Sign-ins, tokens and every Google call stay on this box.
+        self.signin_service = (signin_service or '').rstrip('/')
+        host = urllib.parse.urlsplit(self.signin_service).hostname if self.signin_service else None
+        self.transport = transport or google.Transport(extra_hosts=[host] if host else [])
         self.relay_callback = relay_callback
+        self.gog = gog or gogrun
+        self._signin = {'at': 0, 'value': None}
         self.clock = clock
         self.lock = threading.RLock()
         self.account_locks = {}
@@ -92,7 +101,10 @@ class Broker:
         client = self.state.get('client')
         if not client:
             return None
-        return {'client_id': client['client_id'], 'project_id': client.get('project_id'), 'project_number': client.get('project_number'),
+        if client.get('mode') == 'wizard':
+            return {'mode': 'wizard', 'client_id': client['client_id'], 'project_id': None, 'project_number': None,
+                    'secret_hint': None, 'redirect_uris': [client['redirect_uri']], 'checked': 'ok', 'console_url': None}
+        return {'mode': 'own', 'client_id': client['client_id'], 'project_id': client.get('project_id'), 'project_number': client.get('project_number'),
                 'secret_hint': client['client_secret'][:7] + '…', 'redirect_uris': client.get('redirect_uris', []),
                 'checked': client.get('checked'), 'console_url': setup_flow.client_url(client)}
 
@@ -120,6 +132,10 @@ class Broker:
             client = setup_flow.parse_client(pasted, client_id, client_secret)
         except setup_flow.SetupProblem as problem:
             raise Problem(400, problem.code, problem.message, fix_url=problem.fix_url) from None
+        previous = self.state.get('client')
+        if previous and self.state['accounts'] and (previous.get('mode') == 'wizard' or previous['client_id'] != client['client_id']):
+            # Tokens belong to the client that issued them; a different client cannot refresh them.
+            raise Problem(409, 'client_in_use', 'Disconnect your Google accounts before switching to a different client.')
         check = self.probe_client(client, redirect_uri)
         client.update(added=now(), checked=check['result'])
         with self.lock:
@@ -141,6 +157,63 @@ class Broker:
             self._commit(state)
         return {'forgotten': True}
 
+    # ---------- Wizard's Google app (shared client, no Google Cloud setup) ----------
+
+    def wizard_signin(self, fresh=False):
+        """The shared client the sign-in service offers, or None when it is not available.
+
+        Only public values cross: the client ID and the fixed return page. The secret stays with the service."""
+        if not self.signin_service:
+            return None
+        stamp = self.clock()
+        if not fresh and stamp - self._signin['at'] < (SIGNIN_CACHE if self._signin['value'] else 60):
+            return self._signin['value']
+        value = None
+        try:
+            answer = self.transport.request('GET', self.signin_service + '/v1/client')
+            client_id, redirect = answer.get('client_id'), answer.get('redirect_uri')
+            service_host = urllib.parse.urlsplit(self.signin_service).hostname
+            if (isinstance(client_id, str) and setup_flow.CLIENT_ID.match(client_id) and isinstance(redirect, str)
+                    and redirect.startswith('https://') and urllib.parse.urlsplit(redirect).hostname == service_host):
+                value = {'client_id': client_id, 'redirect_uri': redirect, 'name': str(answer.get('name') or 'Wizard')[:60],
+                         'verified': answer.get('verified') is True}
+        except GoogleError:
+            value = None
+        self._signin = {'at': stamp, 'value': value}
+        return value
+
+    def use_wizard_client(self):
+        """Switch this box to Wizard's Google app. Only before any account is connected: tokens belong to their client."""
+        offered = self.wizard_signin(fresh=True)
+        if not offered:
+            raise Problem(503, 'wizard_signin_unavailable', 'Quick sign-in is not available right now. Use your own Google client instead, or try again later.')
+        with self.lock:
+            current = self.state.get('client')
+            if current and current.get('mode') == 'wizard' and current['client_id'] == offered['client_id']:
+                return {'client': self.client_summary()}
+            if current and self.state['accounts']:
+                raise Problem(409, 'client_in_use', 'Disconnect your Google accounts before changing how Wizard signs in.')
+            state = self._copy()
+            state['client'] = {'mode': 'wizard', 'client_id': offered['client_id'], 'redirect_uri': offered['redirect_uri'],
+                               'service': self.signin_service, 'added': now()}
+            self._commit(state)
+        return {'client': self.client_summary()}
+
+    def _mode(self):
+        client = self.state.get('client')
+        return (client or {}).get('mode', 'own') if client else None
+
+    def _token_request(self, form):
+        """POST to Google's token endpoint with the right client authentication.
+
+        Own client: the secret is on this box. Wizard's Google app: the sign-in service adds the shared
+        secret and passes Google's answer straight back; it keeps nothing."""
+        client = self.state['client']
+        form = {**form, 'client_id': client['client_id']}
+        if client.get('mode') == 'wizard':
+            return self.transport.request('POST', client.get('service', self.signin_service) + '/v1/token', form=form)
+        return self.transport.request('POST', google.TOKEN_URL, form={**form, 'client_secret': client['client_secret']})
+
     def set_setup(self, step=None, done=None, redirect_mode=None):
         with self.lock:
             state = self._copy()
@@ -156,29 +229,53 @@ class Broker:
         return {'setup': self.state['setup']}
 
     def redirect_uri(self, origin, shell_path):
+        client = self.state.get('client')
+        if client and client.get('mode') == 'wizard':
+            return client['redirect_uri']
         mode = self.state['setup'].get('redirect_mode', 'box')
         return setup_flow.redirect_for(mode, origin, shell_path, self.relay_callback)
 
     def setup_plan(self, origin, shell_path):
+        client = self.state.get('client')
+        offered = self.wizard_signin() if not client else None
+        if (client and client.get('mode') == 'wizard') or (not client and offered):
+            connected = any(a.get('status') == 'active' for a in self.state['accounts'].values())
+            step = {'id': 'connect', 'n': 1, 'where': 'wizard', 'how': 'auto', 'title': 'Connect your Google account',
+                    'detail': ['Choose your Google account and press Allow.'], 'done': connected}
+            return {'mode': 'wizard', 'steps': [step], 'count': 1, 'google_steps': 0, 'current': None if connected else 'connect',
+                    'complete': connected, 'warnings': [], 'wizard_available': True,
+                    'redirect': {'mode': 'wizard', 'uri': (client or offered)['redirect_uri'], 'box_ok': setup_flow.box_redirect_ok(origin),
+                                 'relay': None, 'authorized_domain': None}}
         mode = self.state['setup'].get('redirect_mode', 'box')
-        return setup_flow.plan(self.state, redirect_uri=self.redirect_uri(origin, shell_path), redirect_mode=mode,
+        plan = setup_flow.plan(self.state, redirect_uri=self.redirect_uri(origin, shell_path), redirect_mode=mode,
                                box_ok=setup_flow.box_redirect_ok(origin), relay_callback=self.relay_callback)
+        plan['mode'] = 'own'
+        plan['wizard_available'] = bool(offered) if not client else bool(self.signin_service)
+        return plan
 
     # ---------- sign-in ----------
 
-    def start(self, session, origin, shell_path, account=None, operations=()):
+    def start(self, session, origin, shell_path, account=None, operations=(), services=None):
         client = self.state.get('client')
+        if not client and self.wizard_signin():
+            self.use_wizard_client()
+            client = self.state.get('client')
         if not client:
             raise Problem(409, 'client_required', 'Finish setup first: Wizard needs your Google client.')
-        mode = self.state['setup'].get('redirect_mode', 'box')
+        wizard = client.get('mode') == 'wizard'
+        mode = 'wizard' if wizard else self.state['setup'].get('redirect_mode', 'box')
         if mode == 'box' and not setup_flow.box_redirect_ok(origin):
             raise Problem(409, 'box_address_unusable', 'Google needs an https address for this box. Open Wizard through its https address.')
-        if mode == 'relay' and not (origin or '').startswith('https://'):
-            raise Problem(409, 'box_address_unusable', 'The return page can only send you back to an https Wizard address.')
+        if mode in ('relay', 'wizard') and not (origin or '').startswith('https://'):
+            raise Problem(409, 'box_address_unusable', 'Open Wizard through its https address to sign in to Google.')
         redirect_uri = self.redirect_uri(origin, shell_path)
         unknown = [op for op in operations if op not in OPERATIONS]
         if unknown:
             raise Problem(400, 'unknown_operation', f'Unknown operation: {unknown[0]}')
+        if services is None:
+            services = [] if operations else list(google.DEFAULT_SERVICES)
+        if not isinstance(services, list) or any(s not in SERVICES for s in services):
+            raise Problem(400, 'unknown_service', 'Unknown Google service.')
         login_hint = None
         if account is not None:
             current = self.state['accounts'].get(account)
@@ -186,11 +283,13 @@ class Broker:
                 raise Problem(404, 'account_not_found', 'Account not found.')
             login_hint = current.get('email') or None
         scopes = set(IDENTITY_SCOPES) | {OPERATIONS[op]['scope'] for op in operations}
+        for service in services:
+            scopes |= set(SERVICES[service]['scopes'])
         nonce, verifier = secrets.token_urlsafe(24), secrets.token_urlsafe(64)
         state = secrets.token_urlsafe(32)
-        if mode == 'relay':
+        if mode in ('relay', 'wizard'):
             # The return page needs to know where to send the browser. It cannot use the code:
-            # exchanging it needs this box's client secret and PKCE verifier.
+            # exchanging it needs this box's PKCE verifier (and, for an own client, its secret).
             back = origin.rstrip('/') + shell_path + setup_flow.CALLBACK_PATH
             state = 'wg1.' + base64.urlsafe_b64encode(json.dumps({'n': state, 'r': back}, separators=(',', ':')).encode()).rstrip(b'=').decode()
         with self.lock:
@@ -199,8 +298,8 @@ class Broker:
             if len(self.flows) >= 32:
                 raise Problem(429, 'signin_busy', 'Too many sign-ins in progress.')
             self.flows[sha(state)] = {'session': session, 'verifier': verifier, 'nonce': nonce, 'redirect_uri': redirect_uri,
-                                      'account': account, 'scopes': sorted(scopes), 'expires': stamp + FLOW_TTL,
-                                      'status': 'pending', 'result': None, 'started': stamp}
+                                      'account': account, 'scopes': sorted(scopes), 'services': sorted(set(services)),
+                                      'expires': stamp + FLOW_TTL, 'status': 'pending', 'result': None, 'started': stamp}
         challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b'=').decode()
         params = {'client_id': client['client_id'], 'redirect_uri': redirect_uri, 'response_type': 'code',
                   'scope': ' '.join(sorted(scopes)), 'state': state, 'nonce': nonce, 'access_type': 'offline',
@@ -272,9 +371,8 @@ class Broker:
         if not client:
             raise Problem(409, 'client_required', 'Setup was reset during sign-in.')
         try:
-            value = self.transport.request('POST', google.TOKEN_URL, form={
-                'grant_type': 'authorization_code', 'code': code, 'client_id': client['client_id'],
-                'client_secret': client['client_secret'], 'redirect_uri': flow['redirect_uri'], 'code_verifier': flow['verifier']})
+            value = self._token_request({'grant_type': 'authorization_code', 'code': code, 'redirect_uri': flow['redirect_uri'],
+                                         'code_verifier': flow['verifier']})
         except GoogleError as failure:
             raise Problem(failure.status, failure.code, failure.message) from None
         if str(value.get('token_type', '')).lower() != 'bearer' or not isinstance(value.get('access_token'), str):
@@ -296,6 +394,8 @@ class Broker:
                 raise Problem(502, 'no_refresh_token', 'Google did not allow offline access. Remove Wizard from your Google account permissions and connect again.',
                               fix_url='https://myaccount.google.com/connections')
             stamp = now()
+            # Services the owner ticked on this sign-in come on if Google granted them; earlier choices stay.
+            services = set(previous.get('services', [])) | {sv for sv in flow.get('services', []) if google.service_granted(granted, sv)}
             state['accounts'][account] = {
                 'id': account, 'sub': claims['sub'],
                 'email': str(claims.get('email', ''))[:254] if claims.get('email_verified', True) else '',
@@ -303,20 +403,25 @@ class Broker:
                 'status': 'active', 'scopes': sorted(granted),  # include_granted_scopes: Google reports the full set
                 'access_token': value['access_token'], 'expires': self.clock() + lifetime, 'refresh_token': refresh,
                 'refresh_expires': self.clock() + value['refresh_token_expires_in'] if isinstance(value.get('refresh_token_expires_in'), (int, float)) else None,
-                'added': previous.get('added', stamp), 'signed_in': stamp, 'error': None, 'apis': previous.get('apis', {})}
+                'added': previous.get('added', stamp), 'signed_in': stamp, 'error': None, 'apis': previous.get('apis', {}),
+                'services': sorted(services), 'label': previous.get('label', '')}
             self._commit(state)
         missing = sorted(set(flow['scopes']) - granted - set(IDENTITY_SCOPES))
         return {'connected': True, 'account': account, 'email': state['accounts'][account]['email'],
-                'declined': [op for op, spec in OPERATIONS.items() if spec['scope'] in missing]}
+                'declined': [op for op, spec in OPERATIONS.items() if spec['scope'] in missing],
+                'declined_services': [sv for sv in flow.get('services', []) if not google.service_granted(granted, sv)]}
 
     # ---------- accounts ----------
 
     def account_view(self, account):
         a = self.state['accounts'][account]
-        allowed = [op for op, spec in OPERATIONS.items() if spec['scope'] in a['scopes']]
-        return {'id': a['id'], 'email': a['email'], 'name': a.get('name', ''), 'status': a['status'], 'error': a.get('error'),
-                'allowed': allowed, 'apis': a.get('apis', {}), 'added': a.get('added'), 'signed_in': a.get('signed_in'),
-                'refresh_expires': a.get('refresh_expires')}
+        allowed = [op for op, spec in OPERATIONS.items() if google.has_scope(a['scopes'], spec['scope'])]
+        on = set(a.get('services', []))
+        services = [{'id': sv, 'label': spec['label'], 'what': spec['what'], 'granted': google.service_granted(a['scopes'], sv),
+                     'on': sv in on and google.service_granted(a['scopes'], sv)} for sv, spec in SERVICES.items()]
+        return {'id': a['id'], 'email': a['email'], 'name': a.get('name', ''), 'label': a.get('label', ''), 'status': a['status'],
+                'error': a.get('error'), 'allowed': allowed, 'services': services, 'apis': a.get('apis', {}), 'added': a.get('added'),
+                'signed_in': a.get('signed_in'), 'refresh_expires': a.get('refresh_expires')}
 
     def find_account(self, value):
         if not isinstance(value, str):
@@ -360,14 +465,12 @@ class Broker:
             return a['access_token']
         client = self.state['client']
         try:
-            value = self.transport.request('POST', google.TOKEN_URL, form={
-                'grant_type': 'refresh_token', 'refresh_token': a['refresh_token'],
-                'client_id': client['client_id'], 'client_secret': client['client_secret']})
+            value = self._token_request({'grant_type': 'refresh_token', 'refresh_token': a['refresh_token']})
         except GoogleError as failure:
             if failure.code in ('reauth_required', 'client_invalid'):
                 self._mark(account, 'reauth_required', failure.code)
                 hint = None
-                if failure.code == 'reauth_required' and not self.state['setup']['checked'].get('publish'):
+                if failure.code == 'reauth_required' and client.get('mode') != 'wizard' and not self.state['setup']['checked'].get('publish'):
                     hint = 'If your Google app is still in Testing, Google ends sign-ins after 7 days. Publish it, then reconnect.'
                 raise Problem(409, 'reauth_required', hint or 'Google ended this sign-in. Connect the account again.', account=account,
                               fix_url=setup_flow.console('auth/audience', client.get('project_id')) if hint else None) from None
@@ -403,7 +506,7 @@ class Broker:
             token = self._token(account)
             scopes = set(self.state['accounts'][account]['scopes'])
             for api, (operation, url) in google.API_PROBES.items():
-                if OPERATIONS[operation]['scope'] not in scopes:
+                if not google.has_scope(scopes, OPERATIONS[operation]['scope']):
                     results[api] = {'status': 'not_allowed'}
                     continue
                 try:
@@ -411,7 +514,7 @@ class Broker:
                     results[api] = {'status': 'ok'}
                 except GoogleError as failure:
                     if failure.code == 'api_not_enabled':
-                        results[api] = {'status': 'not_enabled', 'fix_url': setup_flow.enable_url([api], project)}
+                        results[api] = {'status': 'not_enabled', 'fix_url': None if self._mode() == 'wizard' else setup_flow.enable_url([api], project)}
                     elif failure.code == 'google_permission_missing':
                         results[api] = {'status': 'not_allowed'}
                     else:
@@ -556,7 +659,7 @@ class Broker:
             raise Problem(403, 'grant_required', 'The owner has not allowed this for that account. Ask with google_request_access.')
         spec = OPERATIONS[operation]
         with self._account_lock(account):
-            if spec['scope'] not in self.state['accounts'][account]['scopes']:
+            if not google.has_scope(self.state['accounts'][account]['scopes'], spec['scope']):
                 raise Problem(403, 'google_permission_missing', 'Google has not been allowed this for the account yet. The owner can add it in the Google app.')
             token = self._token(account)
             retried = False
@@ -596,6 +699,114 @@ class Broker:
             self._audit(state, client, account, operation, outcome)
             self._commit(state)
 
+    # ---------- service switches (what the owner's agents may use, per account) ----------
+
+    def set_service(self, account, service, on):
+        if service not in SERVICES or not isinstance(on, bool):
+            raise Problem(400, 'unknown_service', 'Unknown Google service.')
+        with self.lock:
+            current = self.state['accounts'].get(account)
+            if not current:
+                raise Problem(404, 'account_not_found', 'Account not found.')
+            if on and not google.service_granted(current['scopes'], service):
+                # Google has not been asked for this yet: the page sends the owner to Google for just this service.
+                raise Problem(409, 'consent_needed', f'Google needs your OK for {SERVICES[service]["label"]} first.', service=service, account=account)
+            state = self._copy()
+            services = set(state['accounts'][account].get('services', []))
+            services.add(service) if on else services.discard(service)
+            state['accounts'][account]['services'] = sorted(services)
+            self._commit(state)
+        return {'account': self.account_view(account)}
+
+    def set_label(self, account, label):
+        if not isinstance(label, str) or len(label.strip()) > 40:
+            raise Problem(400, 'invalid_label', 'Use a short name, like Work or Personal.')
+        with self.lock:
+            if account not in self.state['accounts']:
+                raise Problem(404, 'account_not_found', 'Account not found.')
+            state = self._copy()
+            state['accounts'][account]['label'] = label.strip()
+            self._commit(state)
+        return {'account': self.account_view(account)}
+
+    def _services_on(self, account):
+        a = self.state['accounts'][account]
+        return [sv for sv in a.get('services', []) if sv in SERVICES and google.service_granted(a['scopes'], sv)]
+
+    def _roots(self, account):
+        return {root for sv in self._services_on(account) for root in SERVICES[sv]['commands']}
+
+    def _pick_account(self, value, root=None):
+        """The account an agent means: named by email/label/id, or the only one with that service on."""
+        accounts = self.state['accounts']
+        if value not in (None, ''):
+            if not isinstance(value, str):
+                raise Problem(400, 'invalid_account', 'Name the account by its email.')
+            wanted = value.strip().lower()
+            for a in accounts.values():
+                if wanted in (a['id'], (a.get('email') or '').lower(), (a.get('label') or '').lower()):
+                    return a['id']
+            raise Problem(404, 'account_not_found', 'No connected Google account matches that.', accounts=[a['email'] for a in accounts.values()])
+        candidates = [a for a in accounts if a in self.state['accounts'] and (root is None or root in self._roots(a))]
+        if len(candidates) == 1:
+            return candidates[0]
+        if not candidates:
+            raise Problem(403, 'service_off', 'No connected Google account has this switched on. The owner can switch it on in the Google app.',
+                          app_link='/wizard-os-home/?open=wizard-google')
+        raise Problem(400, 'account_required', 'Several accounts can do this; name one with "account".',
+                      accounts=[accounts[a]['email'] for a in candidates])
+
+    def run_gog(self, caller, args, account=None):
+        """Run one gog command for an agent on one account, limited to the services the owner switched on."""
+        if not self.state.get('client') or not self.state['accounts']:
+            raise Problem(409, 'not_connected', 'No Google account is connected yet. The owner connects one in the Google app.',
+                          app_link='/wizard-os-home/?open=wizard-google')
+        root = None
+        if isinstance(args, list) and args and isinstance(args[0], str):
+            root = self.gog.ALIASES.get(args[0], args[0])
+        account = self._pick_account(account, root)
+        roots = self._roots(account)
+        try:
+            self.gog.check_args(args, roots)
+        except self.gog.RunProblem as problem:
+            self._record(caller, account, f'gog:{root or "?"}', problem.code)
+            raise Problem(403 if problem.code == 'service_off' else 400, problem.code, problem.message) from None
+        # Only the token fetch holds the account lock; gog itself runs unlocked so calls can overlap.
+        with self._account_lock(account):
+            token = self._token(account)
+        try:
+            result = self.gog.run(args, token, roots)
+            if result['exit_code'] == 4:  # gog: auth_required. One retry with a fresh token.
+                with self._account_lock(account):
+                    self._expire(account)
+                    token = self._token(account)
+                result = self.gog.run(args, token, roots)
+        except self.gog.RunProblem as problem:
+            self._record(caller, account, f'gog:{root}', problem.code)
+            raise Problem(502 if problem.code in ('gog_missing', 'timeout') else 400, problem.code, problem.message) from None
+        self._record(caller, account, f'gog:{" ".join(a for a in args[:2] if not a.startswith("-"))}', 'ok' if result['exit_code'] == 0 else f'exit {result["exit_code"]}')
+        return {'account': self.state['accounts'][account]['email'], **result}
+
+    def gog_help(self, command=''):
+        roots = set()
+        for account in self.state['accounts']:
+            roots |= self._roots(account)
+        try:
+            return self.gog.help_for(command, roots)
+        except self.gog.RunProblem as problem:
+            raise Problem(400, problem.code, problem.message) from None
+
+    def agent_status(self):
+        """What the owner's agents can use. Never a token."""
+        client = self.state.get('client')
+        return {'connected': bool(client) and any(a['status'] == 'active' for a in self.state['accounts'].values()),
+                'sign_in': (client or {}).get('mode', 'own') if client else None,
+                'accounts': [{'email': a['email'], 'label': a.get('label', ''), 'status': a['status'],
+                              'services': self._services_on(a['id']),
+                              'commands': sorted(self._roots(a['id']))} for a in self.state['accounts'].values()],
+                'services': {sv: spec['label'] for sv, spec in SERVICES.items()},
+                'app_link': '/wizard-os-home/?open=wizard-google'}
+
     # ---------- views ----------
 
     def operations(self):
@@ -615,14 +826,22 @@ class Broker:
                 'clients': self.clients(),
                 'requests': [{**r, 'label': client_label(r['client'])} for r in self.state['requests'].values() if r['status'] == 'pending'],
                 'operations': self.operations(), 'apis': google.APIS,
+                'services': [{'id': sv, 'label': spec['label'], 'what': spec['what'], 'default': sv in google.DEFAULT_SERVICES}
+                             for sv, spec in SERVICES.items()],
+                'sign_in': self._sign_in_view(),
                 'signin': self.flow_status(session) if session else {'status': 'none'},
                 'audit': self.state['audit'][-30:][::-1]}
+
+    def _sign_in_view(self):
+        mode = self._mode()
+        offered = self.wizard_signin() if mode != 'own' else None
+        return {'mode': mode, 'wizard_available': bool(offered), 'verified': bool(offered and offered.get('verified'))}
 
     def connection(self):
         """Read-only status in the shape of the other connection apps. Never a token."""
         accounts = list(self.state['accounts'].values())
         if not self.state['client']:
-            status, error = 'not_connected', {'code': 'setup_required', 'message': 'Google setup is not finished.'}
+            status, error = 'not_connected', {'code': 'signed_out', 'message': 'No Google account connected.'}
         elif not accounts:
             status, error = 'not_connected', {'code': 'signed_out', 'message': 'No Google account connected.'}
         elif all(a['status'] != 'active' for a in accounts):
@@ -631,7 +850,8 @@ class Broker:
             status, error = 'connected', None
         return {'contract': 'wizard.google-connection/1', 'provider': 'google', 'name': 'Google', 'status': status,
                 'plan': None, 'account': ', '.join(a['email'] for a in accounts if a['email']) or None, 'usage': None,
-                'accounts': [{'id': a['id'], 'email': a['email'], 'status': a['status']} for a in accounts],
+                'accounts': [{'id': a['id'], 'email': a['email'], 'label': a.get('label', ''), 'status': a['status'],
+                              'services': self._services_on(a['id'])} for a in accounts],
                 'error': error}
 
     def caller_status(self, client):

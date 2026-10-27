@@ -84,7 +84,8 @@ class Plan(Base):
     def test_api_link_names_every_api_and_the_exact_project(self):
         apis = next(s for s in self.broker.setup_plan('http://127.0.0.1:18812', '/')['steps'] if s['id'] == 'apis')
         self.assertEqual(apis['url'], 'https://console.cloud.google.com/apis/enableflow?apiid=gmail.googleapis.com,calendar-json.googleapis.com,'
-                                      'drive.googleapis.com,people.googleapis.com,youtube.googleapis.com&project=wizard-test-123')
+                                      'drive.googleapis.com,docs.googleapis.com,sheets.googleapis.com,slides.googleapis.com,people.googleapis.com,'
+                                      'youtube.googleapis.com&project=wizard-test-123')
 
     def test_links_carry_the_project_after_the_client_is_known(self):
         plan = self.broker.setup_plan('http://127.0.0.1:18812', '/')

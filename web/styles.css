@@ -13,7 +13,6 @@
 a.wz-button { display: inline-flex; align-items: center; justify-content: center; text-decoration: none; }
 .wz-button.small { min-height: 34px; padding: 4px 12px; font-size: 13px; }
 .wz-button.danger { background: color-mix(in srgb, var(--danger) 18%, transparent); color: var(--danger); border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent); }
-.wz-button.secondary.danger { margin: 10px 8px; }
 label.wz-button { display: inline-flex; align-items: center; cursor: pointer; }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .wz-chip.linkish { text-decoration: none; color: var(--accent); min-height: 32px; }
@@ -78,3 +77,18 @@ html[data-skin="signal"] .num { border-radius: 2px; }
 .toggle[aria-pressed="true"] .wz-main b { color: var(--ink); }
 /* Sheet actions stay in reach while the list scrolls. */
 .wz-sheet > .actions:last-child { position: sticky; bottom: calc(-1 * var(--wz-space-4)); margin: 12px calc(-1 * var(--wz-space-4)) calc(-1 * var(--wz-space-4)); padding: 12px var(--wz-space-4) var(--wz-space-4); background: var(--wz-overlay); backdrop-filter: blur(20px); border-top: 1px solid var(--line); }
+
+/* 0.2: connector pattern (status card, accounts with service switches, one primary action, details collapsed) */
+.wz-conn .sigil { display: grid; place-items: center; overflow: hidden; padding: 0; background: var(--fill-2); }
+.wz-conn .sigil img { width: 100%; height: 100%; object-fit: cover; }
+.conn-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.accounts { padding: 2px 0; }
+.account { border: 1px solid var(--line); border-radius: var(--r); background: var(--fill); overflow: hidden; }
+.account > .wz-row:first-child { border-bottom: 1px solid var(--line); }
+.account .wz-row .wz-pill { flex: none; }
+.primary { display: grid; gap: 6px; padding: 14px 0 4px; }
+.primary .wz-button { width: 100%; }
+.hint { margin-top: 12px; }
+.label-form .wz-field { width: 100%; }
+.chips { padding: 8px 0 2px; }
+.wz-more .group { margin: 12px 8px 4px; }

@@ -12,13 +12,15 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     pids_limit: 128
-    mem_limit: 256m
-    tmpfs: ["/tmp:rw,nosuid,size=16m,uid=1000,gid=1000"]
+    mem_limit: 384m
+    tmpfs: ["/tmp:rw,nosuid,size=64m,uid=1000,gid=1000"]
     environment:
       PORT: "18812"
       DATA_DIR: /data
       # Optional stateless return page for boxes without their own https address (see relay/).
       GOOGLE_RELAY_CALLBACK: ${GOOGLE_RELAY_CALLBACK:-}
+      # Wizard's Google app (quick sign-in): the stateless sign-in service in relay/. Empty = own Google client only.
+      GOOGLE_SIGNIN_SERVICE: ${GOOGLE_SIGNIN_SERVICE:-https://www.aiwizards.com/wizard-google/auth}
       # Inside the Wizard shell, Tailscale Serve names the signed-in tailnet user; only these logins own the page.
       WIZARD_SHELL_AUTH: ${WIZARD_SHELL_AUTH:-tailscale-serve}
       WIZARD_OWNER_LOGINS: ${WIZARD_OWNER_LOGINS:-}
