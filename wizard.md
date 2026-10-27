@@ -10,7 +10,7 @@ license: MIT
 source: https://github.com/humanitylabs-org/wizard-google
 icon: icon.png
 runtime:
-  package: build
+  package: image
   kind: runtipi
   config: runtipi/config.json
   compose: runtipi/docker-compose.yml
