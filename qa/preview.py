@@ -1,6 +1,6 @@
 """QA preview: the real server and UI with a labelled FAKE Google, seeded into one of three states.
 
-    python3 qa/preview.py --port 18890 --scenario fresh|paste|connected
+    python3 qa/preview.py --port 18890 --scenario fresh|paste|connected|quick|quick-connected [--core <wizard-ux>/web/core]
 
 Adds /__qa/host.html, a same-origin stand-in for the Wizard shell that frames the app and posts
 Appearance v1 messages (skin from ?skin=). Never use this outside local QA.
@@ -15,7 +15,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path[:0] = [str(ROOT / 'app'), str(ROOT / 'tests')]
 import server  # noqa: E402
-from fakes import CLIENT_JSON, FakeGoogle, sign_in  # noqa: E402
+import urllib.parse  # noqa: E402
+from fakes import CLIENT_JSON, SERVICE, FakeGog, FakeGoogle, FakeSigninService, sign_in  # noqa: E402
 
 TOKENS = json.loads((Path(__file__).resolve().parent / 'skins.json').read_text())
 
@@ -30,9 +31,25 @@ window.reskin=s=>{Object.assign(skin,s);send();};
 </script>'''
 
 
+def quick_sign_in(broker, google_fake, sub, email, services):
+    started = broker.start('seed', 'https://box.tail1234.ts.net', '/wizard-google/', None, [], services)
+    query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(started['authorization_url']).query))
+    google_fake.last_nonce = query['nonce']
+    google_fake.issue('c-' + sub, sub, email, sorted(query['scope'].split()))
+    return broker.finish(query['state'], 'seed', 'c-' + sub)['account']
+
+
 def seed(app, scenario):
     broker, fake = app.broker, app.broker.transport
-    if scenario == 'fresh':
+    if scenario in ('fresh', 'quick'):
+        return
+    if scenario == 'quick-connected':
+        work = quick_sign_in(broker, fake.google, '222', 'alex@studio.example', ['gmail', 'calendar', 'drive', 'contacts'])
+        personal = quick_sign_in(broker, fake.google, '111', 'alex.p@gmail.com', ['gmail', 'calendar'])
+        broker.set_label(work, 'Work')
+        broker.set_label(personal, 'Personal')
+        broker.run_gog('agent:main', ['gmail', 'search', 'is:unread newer_than:1d'], 'work')
+        broker.run_gog('agent:main', ['calendar', 'events', '--today'], 'personal')
         return
     broker.set_setup(step='project', done=True)
     broker.set_setup(step='branding', done=True)
@@ -55,11 +72,15 @@ def seed(app, scenario):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--port', type=int, default=18890)
-    parser.add_argument('--scenario', default='connected', choices=['fresh', 'paste', 'connected'])
+    parser.add_argument('--scenario', default='connected', choices=['fresh', 'paste', 'connected', 'quick', 'quick-connected'])
+    parser.add_argument('--core', default='', help='wizard-ux web/core folder: serves the real shared app-client.js at /wizard-os-home/core/')
     args = parser.parse_args()
+    quick = args.scenario.startswith('quick')
     config = server.Config({'PORT': str(args.port), 'DATA_DIR': tempfile.mkdtemp(prefix='wizard-google-qa-'),
-                            'GOOGLE_DEV_MODE': 'loopback-single-owner', 'WIZARD_SHELL_PATH': '/'})
-    app = server.App(config, transport=FakeGoogle())
+                            'GOOGLE_DEV_MODE': 'loopback-single-owner', 'WIZARD_SHELL_PATH': '/', 'GOOGLE_SIGNIN_SERVICE': SERVICE if quick else 'off'})
+    google_fake = FakeGoogle()
+    app = server.App(config, transport=FakeSigninService(google_fake) if quick else google_fake)
+    app.broker.gog = FakeGog()
     seed(app, args.scenario)
     base = server.handler_for(app)
 
@@ -74,6 +95,16 @@ def main():
                 self.send_header('Content-Length', str(len(raw)))
                 self.end_headers()
                 return self.wfile.write(raw)
+            if self.path.startswith('/wizard-os-home/core/') and args.core:
+                name = self.path.split('?')[0].rsplit('/', 1)[1]
+                path = Path(args.core) / name
+                if path.is_file() and path.suffix == '.js':
+                    raw = path.read_bytes()
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/javascript; charset=utf-8')
+                    self.send_header('Content-Length', str(len(raw)))
+                    self.end_headers()
+                    return self.wfile.write(raw)
             return super().do_GET()
 
     from http.server import ThreadingHTTPServer

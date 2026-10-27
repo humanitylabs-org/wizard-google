@@ -9,15 +9,17 @@ import unittest
 import urllib.parse
 from pathlib import Path
 
-from fakes import CLIENT_JSON, FakeGoogle
+from fakes import CLIENT_JSON, FakeGog, FakeGoogle
 
 import server
 
 
 def start(env):
     fake = FakeGoogle()
-    config = server.Config(env)
-    srv, app = server.serve(config, server.App(config, transport=fake))
+    config = server.Config({'GOOGLE_SIGNIN_SERVICE': 'off', **env})
+    app = server.App(config, transport=fake)
+    app.broker.gog = FakeGog()
+    srv, app = server.serve(config, app)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv, app, fake
 
@@ -49,7 +51,7 @@ class Client:
         try:
             value = json.loads(data)
         except ValueError:
-            value = data.decode()
+            value = data.decode('utf-8', 'replace')
         return response.status, value, cookie
 
     def bootstrap(self, extra=None):
@@ -108,21 +110,33 @@ class LoopbackOwner(unittest.TestCase):
         self.assertEqual(saved['check']['result'], 'ok')
         account = self.connect('111', 'owner@gmail.com', ['gmail.search', 'gmail.read'])
 
-        # The agent sees the account but may do nothing until the owner allows it.
+        # The agent sees the account and the services switched on for it, never a token.
         agent = Client(self.port)
         seen = agent.mcp('google_status')
-        self.assertEqual(seen['caller'], 'agent:main')
-        self.assertEqual(seen['accounts'][0]['operations'], [])
-        self.assertEqual(agent.mcp('google_gmail_search', {'query': 'lunch'})['error']['code'], 'grant_required')
-        asked = agent.mcp('google_request_access', {'operations': ['gmail.search'], 'reason': 'Summarise my inbox'})
+        self.assertEqual(seen['accounts'][0]['email'], 'owner@gmail.com')
+        self.assertEqual(seen['accounts'][0]['services'], [])  # the 0.1-style sign-in asked only for typed operations
+        self.assertEqual(agent.mcp('google_run', {'args': ['gmail', 'search', 'lunch']})['error']['code'], 'service_off')
+        # The owner switches Gmail on: Google has not been asked for it yet, so the page is told to ask.
+        status, value, _ = self.owner.send('POST', f'/api/accounts/{account}/service', {'service': 'gmail', 'on': True})
+        self.assertEqual((status, value['error']['code']), (409, 'consent_needed'))
+        status, value, _ = self.owner.send('POST', '/api/oauth/start', {'account': account, 'services': ['gmail']})
+        query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(value['authorization_url']).query))
+        self.assertIn('https://www.googleapis.com/auth/gmail.modify', query['scope'].split())
+        self.fake.last_nonce = query['nonce']
+        self.fake.issue('code-111b', '111', 'owner@gmail.com', sorted(query['scope'].split()))
+        status, page, _ = self.owner.send('GET', '/oauth/callback?' + urllib.parse.urlencode({'state': query['state'], 'code': 'code-111b'}))
+        self.assertEqual(status, 200, page)
         status, home, _ = self.owner.send('GET', '/api/home')
-        self.assertEqual(home['requests'][0]['id'], asked['request']['id'])
-        status, _, _ = self.owner.send('POST', f"/api/requests/{asked['request']['id']}/approve", {'account': account})
+        gmail = next(sv for sv in home['accounts'][0]['services'] if sv['id'] == 'gmail')
+        self.assertEqual((gmail['granted'], gmail['on']), (True, True))
+        found = agent.mcp('google_run', {'args': ['gmail', 'search', 'lunch']})
+        self.assertEqual((found['account'], found['exit_code']), ('owner@gmail.com', 0))
+        self.assertEqual(self.app.broker.gog.runs[-1]['roots'], ['gmail'])
+        # Switching it off stops the agent at once.
+        status, _, _ = self.owner.send('POST', f'/api/accounts/{account}/service', {'service': 'gmail', 'on': False})
         self.assertEqual(status, 200)
-        found = agent.mcp('google_gmail_search', {'query': 'lunch'})
-        self.assertEqual(found['messages'][0]['subject'], 'Lunch')
-        # A different agent has its own, empty grants.
-        self.assertEqual(agent.mcp('google_gmail_search', {}, {'X-Wizard-Agent': 'research'})['error']['code'], 'grant_required')
+        self.assertEqual(agent.mcp('google_run', {'args': ['gmail', 'search', 'lunch']})['error']['code'], 'service_off')
+        self.assertEqual(agent.mcp('google_help')['commands'], [])
         # No response anywhere carries a token or the client secret.
         everything = json.dumps([home, seen, found, self.owner.send('GET', '/api/home')[1]])
         for secret in ('fake-secret-for-tests', 'rt-111', 'at-111'):
@@ -152,9 +166,7 @@ class LoopbackOwner(unittest.TestCase):
             self.assertEqual(status, 403, headers)
         status, value, _ = c.send('POST', '/mcp', {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'}, browser=False)
         names = {t['name'] for t in value['result']['tools']}
-        self.assertIn('google_setup_guide', names)
-        guide = c.mcp('google_setup_guide')
-        self.assertEqual(guide['count'], 7)
+        self.assertEqual(names, {'google_status', 'google_run', 'google_help'})
 
     def test_4_owner_writes_need_csrf_and_same_origin(self):
         status, _, _ = self.owner.send('POST', '/api/setup/step', {'step': 'publish', 'done': True}, {'X-CSRF-Token': 'wrong'})
@@ -181,7 +193,7 @@ class LoopbackOwner(unittest.TestCase):
         self.assertEqual((status, value['contract'], value['provider']), (200, 'wizard.google-connection/1', 'google'))
         status, _, _ = Client(self.port).send('GET', '/api/connection', headers={'X-Forwarded-For': '1.1.1.1'}, browser=False)
         self.assertEqual(status, 403)
-        for asset in ('/', '/app.js', '/styles.css', '/appearance-client.js'):
+        for asset in ('/', '/app.js', '/styles.css', '/sheet.js', '/icon.png', '/standalone.css'):
             self.assertEqual(Client(self.port).send('GET', asset, browser=False)[0], 200, asset)
         self.assertEqual(Client(self.port).send('GET', '/../app/server.py', browser=False)[0], 404)
 

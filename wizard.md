@@ -4,8 +4,8 @@ id: wizard-google
 name: Google
 type: external
 category: system
-version: 0.1.0
-summary: Your Google accounts on your own Google client. Apps and agents get only the operations you allow.
+version: 0.2.0
+summary: Sign in to Google once, then choose what your agent may use. Gmail, Calendar, Drive, Docs, Sheets, Contacts, YouTube; several accounts.
 license: MIT
 source: https://github.com/humanitylabs-org/wizard-google
 icon: icon.png
@@ -35,11 +35,12 @@ health: /healthz
 
 # Google
 
-Connect Gmail, Calendar, Drive, Contacts and YouTube to your Wizard with **your own Google Cloud OAuth client**. There is no AI Wizards server in the middle: the sign-in returns to your box, tokens never leave it, and only this app ever holds them.
+Connect Gmail, Calendar, Drive (with Docs and Sheets), Contacts and YouTube to your Wizard. Sign in once per Google account, then switch on, per account, what your agent may use. Work and personal accounts sit side by side.
 
-- **Setup inside the app:** seven counted steps (five short visits to Google Cloud, each deep-linked with the values to paste, plus two in Wizard). Wizard checks the client with Google the moment you paste it, spots a Testing-mode app, and links straight to any API that still needs turning on.
-- **Several accounts.** Personal and work side by side.
-- **Per app and per agent grants.** You tick which operations each app or agent may use on which account (for example: Main agent may search mail on your personal account; Meeting Recorder may see events on your work calendar). Wizard makes the Google call; no other app ever holds a Google token. Apps and agents ask, and the request waits for you on the home screen.
-- **Moves with the box.** Your client, encrypted sign-ins, the store key and every grant live in this app's data folder (`${APP_DATA_DIR}/data`), so a backup restored on a new box needs no reconnect. Stop the old box before starting the new one.
+- **Quick sign-in (default).** Tap **Connect Google**, tick what your agent may use, sign in on Google's page, tap **Return to Wizard**. About a minute, on your phone or laptop. It uses Wizard's shared Google app through a stateless sign-in service (`relay/`): your sign-in is stored only on this box, encrypted; the service keeps nothing and cannot use a sign-in code without the one-time secret only your box holds.
+- **Your own Google client (optional).** Prefer that no shared Google app is involved? More → Sign-in → Your own Google client walks you through Google Cloud (about ten minutes). Nothing else changes.
+- **Your agent works through gog.** Agents call `google_run` with a [gogcli](https://github.com/steipete/gogcli) command (pinned v0.45.0, checksum-verified). The app hands gog a short-lived access token for one account and only the command groups you switched on, in an empty folder; gog never sees a refresh token, a secret or this app's data.
+- **Apps** (other Wizard apps) use typed operations at `/consumer/v1` with their Wizard grant or an access key, per account and operation, as before.
+- **Moves with the box.** Sign-ins, the store key and every switch live in this app's data folder (`${APP_DATA_DIR}/data`), so a backup restored on a new box needs no reconnect. Stop the old box before starting the new one.
 
-MCP at `/mcp` for agents on this box (`google_status`, `google_setup_guide`, `google_request_access` and one tool per operation). Apps use `/consumer/v1` with their Wizard grant (`X-Wizard-Grant`) or an access key made in the app. Read-only status for the shell at `/api/connection` (`wizard.google-connection/1`).
+MCP at `/mcp` for agents on this box: `google_status`, `google_run`, `google_help`. Read-only status for the shell at `/api/connection` (`wizard.google-connection/1`).

@@ -1,10 +1,12 @@
-/* Google for Wizard: setup, accounts and who may use them. Plain DOM, no framework.
- * Back: the open sheet closes first, then the nested view, then the app stays at home. */
+/* Google for Wizard: connect Google accounts once, then switch on what your agent may use.
+ * Connector pattern (APP-DESIGN-RULES rule 5): status card, accounts, one primary action, details collapsed.
+ * Plain DOM, no framework. Back: an open sheet closes first (sheet.js), then a nested page, then the app stays home. */
 'use strict';
 (() => {
   const $ = id => document.getElementById(id);
   const view = $('view'), sheet = $('sheet'), status = $('status');
-  let csrf = null, home = null, stack = [], polling = null, seq = 0;
+  let csrf = null, home = null, stack = [], polling = null, seq = 0, busy = false;
+  const CHECK = '<i><svg viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg></i>';
 
   // ---------- small DOM helpers ----------
   function el(tag, text, cls, attrs) {
@@ -19,13 +21,21 @@
   function row(title, sub, onclick, tile, trailing) {
     const r = el(onclick ? 'button' : 'div', null, 'wz-row', onclick ? { type: 'button' } : {});
     if (onclick) r.onclick = onclick;
-    if (tile != null) r.append(el('span', tile, 'wz-tile', { 'aria-hidden': 'true' }));
+    if (tile != null) r.append(typeof tile === 'string' ? el('span', tile, 'wz-tile', { 'aria-hidden': 'true' }) : tile);
     const main = el('span', null, 'wz-main'); main.append(el('b', title)); if (sub) main.append(el('small', sub)); r.append(main);
     if (trailing) r.append(trailing); else if (onclick) r.append(el('span', '›', 'chev', { 'aria-hidden': 'true' }));
     return r;
   }
   function section(title, ...children) { const s = el('section', null, 'wz-sec'); if (title) s.append(el('h2', title, 'wz-sec-h')); s.append(...children); return s; }
+  function pill(kind, text) { return el('span', text, `wz-pill ${kind}`); }
   function say(text, note) { status.textContent = text || ''; status.classList.toggle('note', !!note); if (note && text) setTimeout(() => { if (status.textContent === text) say(''); }, 3500); }
+  function toggle(on, title, sub, onclick, disabled) {
+    const t = el('button', null, 'wz-row toggle', { type: 'button', 'aria-pressed': String(on) });
+    const check = el('span', null, 'wz-check', { 'aria-hidden': 'true' }); check.innerHTML = CHECK;
+    const main = el('span', null, 'wz-main'); main.append(el('b', title)); if (sub) main.append(el('small', sub));
+    t.append(check, main); t.onclick = onclick; if (disabled) t.disabled = true;
+    return t;
+  }
   function copyRow(label, value) {
     const wrap = el('div', null, 'copy');
     wrap.append(el('small', label), el('code', value || '—'));
@@ -36,7 +46,8 @@
     return wrap;
   }
   const opLabel = id => (home.operations.find(o => o.id === id) || { label: id }).label;
-  const accountName = id => (home.accounts.find(a => a.id === id) || { email: 'any account' }).email;
+  const accountName = id => { const a = home.accounts.find(x => x.id === id); return a ? (a.label ? `${a.label} (${a.email})` : a.email) : 'any account'; };
+  const initial = text => (text || '?').trim().charAt(0).toUpperCase();
 
   // ---------- API ----------
   async function api(path, body) {
@@ -49,22 +60,13 @@
   }
   async function refresh() { home = await api('api/home'); render(); }
 
-  // ---------- navigation and Back ----------
-  function go(next) { stack.push(next); sheetClose(); say(''); render(); view.scrollTop = 0; guardHistory(); }
-  function back() { if (sheet.open) { sheetClose(); return true; } if (!stack.length) return false; stack.pop(); render(); return true; }
-  window.__wizardCloseOverlay = back;  // the shell calls this for Back: handled = true, at root = false
-  addEventListener('message', e => { if (e.source === parent && e.origin === location.origin && e.data?.type === 'wizard:back') back(); });
-
-  // Standalone tab: Back steps inside the app. At home, the first Back only warns.
-  const hosted = () => document.documentElement.classList.contains('wz-hosted');
-  let armedAt = 0;
-  function guardHistory() { if (!hosted() && history.state?.wg !== 'guard') history.pushState({ wg: 'guard' }, ''); }
-  addEventListener('popstate', () => {
-    if (hosted()) return;
-    if (back()) { guardHistory(); return; }
-    if (Date.now() - armedAt < 2000) { history.back(); return; }
-    armedAt = Date.now(); say('Press back again to exit', true); guardHistory();
-  });
+  // ---------- navigation and Back (domain only; the shell owns root/exit) ----------
+  function go(next) { stack.push(next); sheetClose(); say(''); render(); view.scrollTop = 0; }
+  function back() { if (!stack.length) return false; stack.pop(); render(); return true; }
+  if (window.WizardApp?.version === 1) {
+    WizardApp.ready({ name: 'wizard-google', version: '0.2.0' });
+    WizardApp.back.register({ canGoBack: () => stack.length > 0, back });
+  }
 
   // ---------- render ----------
   function render() {
@@ -73,7 +75,6 @@
     view.replaceChildren();
     if (!top) return renderHome();
     if (top.kind === 'setup') return renderSetup();
-    if (top.kind === 'account') return renderAccount(top.id);
     if (top.kind === 'caller') return renderCaller(top.id);
   }
   function crumb(title) {
@@ -82,46 +83,93 @@
     return c;
   }
 
+  function overall() {
+    const active = home.accounts.filter(a => a.status === 'active');
+    if (!home.accounts.length) return ['off', 'Not connected'];
+    if (active.length < home.accounts.length) return ['warn', 'Needs attention'];
+    return ['ok', 'Connected'];
+  }
+  function servicesLine(a) {
+    const on = a.services.filter(s => s.on).map(s => s.label);
+    return on.length ? on.join(' · ') : 'Nothing switched on';
+  }
+  const ready = () => home.sign_in.mode === 'wizard' || (!home.client && home.sign_in.wizard_available) || (home.client && home.setup.steps.every(s => s.id === 'connect' || s.done));
+
   function renderHome() {
-    const setup = home.setup;
-    if (!setup.complete) {
-      const step = setup.steps.find(s => s.id === setup.current);
-      const card = el('div', null, 'wz-card hero');
-      card.append(el('p', home.accounts.length ? 'Finish setup' : 'Connect Google to your Wizard', 'hero-title'),
-        el('p', 'Your own Google sign-in, on your own box. Mail, calendar and files travel only between Google and this box.', 'muted'),
-        progress(setup), el('p', `Step ${step.n} of ${setup.count}: ${step.title}`, 'next'),
-        button(setup.steps.some(s => s.done) ? 'Continue setup' : 'Start setup', () => go({ kind: 'setup' })));
-      view.append(section(null, card));
-    }
-    for (const w of setup.warnings.filter(w => w.code === 'testing_expiry')) view.append(section(null, warning(w)));
-    if (home.requests.length) {
-      view.append(section('Waiting for you', ...home.requests.map(requestCard)));
-    }
-    if (home.client) {
-      const list = el('div', null, 'wz-list');
-      for (const a of home.accounts) list.append(row(a.email || a.name || 'Google account', accountLine(a), () => go({ kind: 'account', id: a.id }), initial(a.email)));
-      list.append(row(home.accounts.length ? 'Connect another account' : 'Connect a Google account', null, () => connectSheet(), '+'));
-      view.append(section('Accounts', list));
-    }
+    // 1. Status card
+    const [kind, word] = overall();
+    const card = el('div', null, 'wz-conn');
+    const tile = el('span', null, 'wz-tile sigil', { 'aria-hidden': 'true' }); tile.append(el('img', null, null, { src: 'icon.png', alt: '' }));
+    const main = el('span', null, 'wz-main');
+    const head = el('span', null, 'conn-head'); head.append(el('b', 'Google'), pill(kind, word));
+    const on = new Set(home.accounts.flatMap(a => a.services.filter(s => s.on).map(s => s.label)));
+    main.append(head, el('small', home.accounts.length
+      ? (on.size ? `Your agent can use ${[...on].join(', ')} on ${home.accounts.length === 1 ? 'your account' : `${home.accounts.length} accounts`}.` : 'Switch on what your agent may use.')
+      : 'Sign in once. Then choose what your agent may use: Gmail, Calendar, Drive, Contacts, YouTube.'));
+    card.append(tile, main);
+    view.append(section(null, card));
+
+    for (const w of home.setup.warnings.filter(w => w.code === 'testing_expiry')) view.append(section(null, warning(w)));
+    if (home.requests.length) view.append(section('Waiting for you', ...home.requests.map(requestCard)));
+
+    // 2. Accounts, each with its service switches
     if (home.accounts.length) {
-      const list = el('div', null, 'wz-list');
-      for (const c of home.clients) list.append(row(c.label, callerLine(c), () => go({ kind: 'caller', id: c.id }), c.kind === 'agent' ? '✦' : '▣'));
-      list.append(row('Give another app access', null, () => newCallerSheet(), '+'));
-      view.append(section('Who can use Google', list));
+      const grid = el('div', null, 'wz-grid accounts');
+      for (const a of home.accounts) grid.append(accountCard(a));
+      view.append(section('Accounts', grid));
     }
-    if (setup.complete || home.client) view.append(section(null, row('Setup', home.client ? `Project ${home.client.project_id || home.client.project_number}` : 'Not finished', () => go({ kind: 'setup' }), '⚙')));
+
+    // 3. One primary action
+    const acts = el('div', null, 'primary');
+    if (ready()) acts.append(button(home.accounts.length ? 'Add another Google account' : 'Connect Google', () => connectSheet()));
+    else {
+      const setup = home.setup, step = setup.steps.find(s => s.id === setup.current);
+      if (step && setup.steps.some(s => s.done)) acts.append(el('p', `Setup step ${step.n} of ${setup.count}: ${step.title}`, 'muted'));
+      acts.append(button(setup.steps.some(s => s.done) ? 'Continue setup' : 'Set up Google', () => go({ kind: 'setup' })));
+    }
+    view.append(acts);
+
+    // 4. Details, collapsed
+    const more = el('details', null, 'wz-more');
+    more.append(el('summary', 'More'));
+    const list = el('div', null, 'wz-list');
+    const mode = home.sign_in.mode || (home.sign_in.wizard_available ? 'wizard' : 'own');
+    list.append(row('Sign-in', mode === 'wizard' ? 'Wizard\'s Google app' : (home.client ? `Your own Google client · ${home.client.project_id || home.client.project_number}` : 'Your own Google client (not set up)'),
+      mode === 'own' || !home.accounts.length ? () => signInSheet() : null, '⚙'));
+    for (const c of home.clients.filter(c => c.kind === 'app')) list.append(row(c.label, callerLine(c), () => go({ kind: 'caller', id: c.id }), '▣'));
+    if (home.accounts.length) list.append(row('Give an app access', 'For other Wizard apps that use Google', () => newCallerSheet(), '+'));
+    more.append(list);
+    if (home.audit.length) {
+      const log = el('div', null, 'wz-list');
+      for (const item of home.audit.slice(0, 12)) log.append(row(`${item.operation}`, `${new Date(item.at * 1000).toLocaleString()} · ${accountName(item.account)} · ${item.outcome}`, null, null));
+      more.append(el('h3', 'Recent use', 'group'), log);
+    }
+    more.append(el('p', 'Your Google sign-ins stay encrypted on this box. Your agent works through gog (gogcli) inside this app and never sees a password or token.', 'muted pad'));
+    view.append(section(null, more));
   }
-  function progress(setup) {
-    const bar = el('div', null, 'progress', { role: 'img', 'aria-label': `${setup.steps.filter(s => s.done).length} of ${setup.count} steps done` });
-    for (const s of setup.steps) bar.append(el('i', null, s.done ? 'done' : s.id === setup.current ? 'now' : ''));
-    return bar;
+
+  function accountCard(a) {
+    const box = el('div', null, 'wz-list account');
+    const tile = el('span', initial(a.label || a.email), 'wz-tile', { 'aria-hidden': 'true' });
+    box.append(row(a.label || a.email || 'Google account', a.label ? a.email : (a.status === 'active' ? servicesLine(a) : null), () => accountSheet(a), tile,
+      a.status === 'active' ? pill('ok', 'Connected') : pill('warn', 'Sign in again')));
+    if (a.status !== 'active') {
+      box.append(row('Google ended this sign-in', 'Sign in again to keep things working.', () => startSignIn(a, a.services.filter(s => s.on).map(s => s.id)), '!'));
+      return box;
+    }
+    for (const s of a.services) {
+      box.append(toggle(s.on, s.label, s.on ? s.what : (s.granted ? 'Off' : 'Off · Google asks you once'), async e => {
+        const t = e.currentTarget; if (busy) return; busy = true; t.disabled = true;
+        try { await api(`api/accounts/${a.id}/service`, { service: s.id, on: !s.on }); await refresh(); say(`${s.label} ${s.on ? 'off' : 'on'} for ${a.label || a.email}.`, true); }
+        catch (err) {
+          if (err.code === 'consent_needed') { busy = false; return startSignIn(a, [...a.services.filter(x => x.on).map(x => x.id), s.id]); }
+          say(err.message); t.disabled = false;
+        } finally { busy = false; }
+      }));
+    }
+    return box;
   }
-  function initial(text) { return (text || '?').trim().charAt(0).toUpperCase(); }
-  function accountLine(a) {
-    if (a.status !== 'active') return 'Needs to be connected again';
-    const groups = [...new Set(a.allowed.map(op => (home.operations.find(o => o.id === op) || {}).group))];
-    return groups.length ? groups.join(', ') : 'Signed in, nothing allowed yet';
-  }
+
   function callerLine(c) {
     if (!c.grants.length) return 'No access';
     return c.grants.map(g => `${g.operations.map(opLabel).join(', ')} · ${accountName(g.account)}`).join('; ');
@@ -148,17 +196,16 @@
     catch (e) { say(e.message); }
   }
 
-  // ---------- setup ----------
+  // ---------- own Google client setup (advanced) ----------
   function renderSetup() {
     const setup = home.setup;
-    view.append(crumb('Setup'));
-    view.append(el('p', `${setup.count} steps, about five minutes. Steps marked Google Cloud open in a new tab; come back here after each one.`, 'intro'));
+    view.append(crumb('Your own Google client'));
+    view.append(el('p', `${setup.count} steps, about ten minutes. Steps marked Google Cloud open in a new tab; come back here after each one.`, 'intro'));
     for (const w of setup.warnings) view.append(warning(w));
     const steps = el('ol', null, 'steps');
-    // Creating the client and handing it over are one sitting: show both together.
     for (const s of setup.steps) steps.append(stepCard(s, s.id === setup.current, s.id === 'paste' && setup.current === 'client'));
     view.append(steps);
-    if (home.client) {
+    if (home.client && home.client.mode === 'own') {
       const foot = el('div', null, 'foot');
       foot.append(link('Your client in Google Cloud ↗', home.client.console_url, 'wz-chip linkish'));
       if (!home.accounts.length) foot.append(button('Use a different client', async () => { try { await api('api/setup/client/forget', {}); await refresh(); } catch (e) { say(e.message); } }, 'wz-chip linkish'));
@@ -194,7 +241,7 @@
     const pick = el('label', 'Upload the file', 'wz-button secondary', { for: 'client-file' });
     file.onchange = async () => { if (file.files[0]) { area.value = await file.files[0].text(); form.requestSubmit(); } };
     const result = el('p', null, 'result');
-    const save = el('button', home.client ? 'Replace client' : 'Check and save', 'wz-button', { type: 'submit' });
+    const save = el('button', home.client && home.client.mode === 'own' ? 'Replace client' : 'Check and save', 'wz-button', { type: 'submit' });
     form.onsubmit = async e => {
       e.preventDefault(); result.textContent = ''; save.disabled = true;
       try {
@@ -208,81 +255,35 @@
       } finally { save.disabled = false; }
     };
     const acts = el('div', null, 'actions'); acts.append(save, pick);
-    if (home.client) form.append(el('p', `Saved: ${home.client.client_id.split('-')[0]}-…  ·  secret ${home.client.secret_hint}`, 'muted'));
+    if (home.client && home.client.mode === 'own') form.append(el('p', `Saved: ${home.client.client_id.split('-')[0]}-…  ·  secret ${home.client.secret_hint}`, 'muted'));
     form.append(area, file, acts, result);
     return form;
   }
 
-  // ---------- account ----------
-  function renderAccount(id) {
-    const a = home.accounts.find(x => x.id === id);
-    if (!a) { stack.pop(); return render(); }
-    view.append(crumb(a.email || 'Google account'));
-    if (a.status !== 'active') {
-      const card = el('div', null, 'wz-card warn');
-      card.append(el('p', 'Google ended this sign-in. Connect it again to keep things working.'), button('Reconnect', () => connectSheet(a)));
-      view.append(section(null, card));
-    }
-    const chips = el('div', null, 'chips');
-    for (const op of a.allowed) chips.append(el('span', opLabel(op), 'wz-chip'));
-    if (!a.allowed.length) chips.append(el('span', 'Nothing yet', 'muted'));
-    view.append(section('Google lets Wizard', chips, padded(button('Allow more…', () => connectSheet(a), 'wz-button secondary'))));
-    const apis = el('div', null, 'wz-list');
-    for (const [api_, name] of Object.entries(home.apis)) {
-      const state = a.apis[api_];
-      const trailing = state === 'not_enabled' ? link('Turn on ↗', home.setup.steps.find(s => s.id === 'apis').url, 'wz-chip linkish')
-        : el('span', { ok: 'On', not_allowed: 'Not allowed', error: 'Error' }[state] || 'Not checked', `wz-chip state-${state || 'none'}`);
-      apis.append(row(name, null, null, null, trailing));
-    }
-    const check = button('Check now', async () => { check.disabled = true; try { await api(`api/accounts/${a.id}/check`, {}); await refresh(); } catch (e) { say(e.message); } finally { check.disabled = false; } }, 'wz-button secondary');
-    view.append(section('Google APIs', apis, padded(check)));
-    const who = el('div', null, 'wz-list');
-    for (const c of home.clients) {
-      const g = c.grants.find(x => x.account === a.id);
-      if (g) who.append(row(c.label, g.operations.map(opLabel).join(', '), () => go({ kind: 'caller', id: c.id }), c.kind === 'agent' ? '✦' : '▣'));
-    }
-    if (!who.childElementCount) who.append(el('p', 'No app or agent can use this account yet.', 'muted pad'));
-    view.append(section('Who can use it', who));
-    view.append(section(null, button('Disconnect', () => confirmSheet(`Disconnect ${a.email}?`, 'Wizard forgets this sign-in and every app and agent loses access to it. Google is asked to revoke it too.', 'Disconnect', async () => {
-      const out = await api(`api/accounts/${a.id}/disconnect`, {}); stack.pop();
-      say(out.revoked_at_google ? 'Disconnected.' : 'Disconnected here. Remove Wizard at myaccount.google.com/connections too.', true); await refresh();
-    }), 'wz-button secondary danger')));
-  }
-
-  // ---------- one app or agent ----------
+  // ---------- one app (typed operations for other Wizard apps) ----------
   function renderCaller(id) {
     const c = home.clients.find(x => x.id === id) || { id, label: id.split(':')[1], kind: id.split(':')[0], grants: [], keys: [] };
     view.append(crumb(c.label));
-    view.append(el('p', c.kind === 'agent' ? 'Tick what this agent may do on each account. It asks you here for anything else.' : 'Tick what this app may do on each account. Wizard makes every Google call for it; the app never sees a Google password or token.', 'intro'));
+    view.append(el('p', 'Tick what this app may do on each account. Wizard makes every Google call for it; the app never sees a Google password or token.', 'intro'));
     for (const a of home.accounts) {
       const g = c.grants.find(x => x.account === a.id);
       const list = el('div', null, 'wz-list');
       for (const op of home.operations) {
         const allowedByGoogle = a.allowed.includes(op.id);
         const on = !!g && g.operations.includes(op.id);
-        const tog = el('button', null, 'wz-row toggle', { type: 'button', 'aria-pressed': String(on) });
-        tog.disabled = !allowedByGoogle && !on;
-        const main = el('span', null, 'wz-main'); main.append(el('b', `${op.group}: ${op.label}`));
-        if (!allowedByGoogle) main.append(el('small', 'Allow it in Google first (account › Allow more)'));
-        else if (op.writes) main.append(el('small', 'Makes changes'));
-        const check = el('span', null, 'wz-check', { 'aria-hidden': 'true' }); check.innerHTML = '<i><svg viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg></i>';
-        tog.append(check, main);
-        tog.onclick = async () => {
-          const next = new Set(g ? g.operations : []); on ? next.delete(op.id) : next.add(op.id);
-          tog.disabled = true;
-          try { await api('api/grants', { client: c.id, account: a.id, operations: [...next] }); await refresh(); } catch (e) { say(e.message); tog.disabled = false; }
-        };
-        list.append(tog);
+        list.append(toggle(on, `${op.group}: ${op.label}`, !allowedByGoogle ? 'Switch the service on for this account first' : (op.writes ? 'Makes changes' : null), async e => {
+          const t = e.currentTarget; const next = new Set(g ? g.operations : []); on ? next.delete(op.id) : next.add(op.id);
+          t.disabled = true;
+          try { await api('api/grants', { client: c.id, account: a.id, operations: [...next] }); await refresh(); } catch (err) { say(err.message); t.disabled = false; }
+        }, !allowedByGoogle && !on));
       }
-      view.append(section(a.email, list));
+      view.append(section(a.label || a.email, list));
     }
-    if (c.kind === 'app') {
-      const keys = el('div', null, 'wz-list');
-      for (const k of c.keys) keys.append(row('Access key', `Made ${new Date(k.created * 1000).toLocaleDateString()}`, null, '⚿',
-        button('Revoke', async () => { try { await api(`api/keys/${k.id}/revoke`, {}); await refresh(); } catch (e) { say(e.message); } }, 'wz-chip linkish')));
-      keys.append(el('p', 'Apps on Wizard grants need no key. An older app can use a key instead.', 'muted pad'));
-      view.append(section('Access key', keys, padded(button('Make a key', makeKey(c), 'wz-button secondary'))));
-    }
+    const keys = el('div', null, 'wz-list');
+    for (const k of c.keys) keys.append(row('Access key', `Made ${new Date(k.created * 1000).toLocaleDateString()}`, null, '⚿',
+      button('Revoke', async () => { try { await api(`api/keys/${k.id}/revoke`, {}); await refresh(); } catch (e) { say(e.message); } }, 'wz-chip linkish')));
+    keys.append(el('p', 'Apps on Wizard grants need no key. An older app can use a key instead.', 'muted pad'));
+    view.append(section('Access key', keys, padded(button('Make a key', makeKey(c), 'wz-button secondary'))));
   }
   function makeKey(c) {
     return async () => {
@@ -297,43 +298,69 @@
   // ---------- sheets ----------
   function openSheet(title, ...children) {
     sheet.replaceChildren(el('h2', title, null, { id: 'sheet-title' }), ...children);
-    if (!sheet.open) sheet.showModal();
+    if (window.WzSheet) WzSheet.open(sheet); else if (!sheet.open) sheet.showModal();
   }
   function sheetClose() { if (sheet.open) sheet.close(); stopPolling(); }
-  sheet.addEventListener('cancel', e => { e.preventDefault(); back(); });
   sheet.addEventListener('close', stopPolling);
   function actionsOf(...buttons) { const a = el('div', null, 'actions'); a.append(...buttons); return a; }
   function padded(...buttons) { const a = actionsOf(...buttons); a.classList.add('pad'); return a; }
 
-  function connectSheet(account) {
-    const chosen = new Set(account ? account.allowed : ['gmail.search', 'gmail.read', 'calendar.read', 'drive.search']);
-    const groups = {};
-    for (const op of home.operations) (groups[op.group] ||= []).push(op);
-    const list = el('div', null, 'wz-list ops');
-    for (const [group, ops] of Object.entries(groups)) {
-      list.append(el('h3', group, 'group'));
-      for (const op of ops) {
-        const t = el('button', null, 'wz-row toggle', { type: 'button', 'aria-pressed': String(chosen.has(op.id)) });
-        const main = el('span', null, 'wz-main'); main.append(el('b', op.label)); if (op.writes) main.append(el('small', 'Makes changes'));
-        const check = el('span', null, 'wz-check', { 'aria-hidden': 'true' }); check.innerHTML = '<i><svg viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg></i>';
-        t.append(check, main);
-        t.onclick = () => { chosen.has(op.id) ? chosen.delete(op.id) : chosen.add(op.id); t.setAttribute('aria-pressed', String(chosen.has(op.id))); };
-        list.append(t);
-      }
+  function connectSheet() {
+    const chosen = new Set(home.services.filter(s => s.default).map(s => s.id));
+    const list = el('div', null, 'wz-list');
+    for (const s of home.services) {
+      const t = toggle(chosen.has(s.id), s.label, s.what, () => { chosen.has(s.id) ? chosen.delete(s.id) : chosen.add(s.id); t.setAttribute('aria-pressed', String(chosen.has(s.id))); });
+      list.append(t);
     }
-    const go_ = button('Continue to Google', () => startSignIn(account, [...chosen]));
-    openSheet(account ? `Allow more on ${account.email}` : 'What may Wizard use?',
-      el('p', 'Google asks you to confirm each item. Apps and agents still need your permission here before they can use any of it.', 'muted'),
-      list, actionsOf(go_, button('Cancel', back, 'wz-button secondary')));
+    const mode = home.sign_in.mode || (home.sign_in.wizard_available ? 'wizard' : 'own');
+    openSheet(home.accounts.length ? 'Add a Google account' : 'Connect Google',
+      el('p', 'What may your agent use on this account? You can change this any time.', 'muted'), list,
+      el('p', mode === 'wizard' && !home.sign_in.verified
+        ? 'Google opens in a new tab. Choose your account, then Continue. If Google says it hasn\'t verified the app, tap Advanced, then Go to Wizard.'
+        : 'Google opens in a new tab. Choose your account and allow access.', 'muted hint'),
+      actionsOf(button('Continue to Google', () => startSignIn(null, [...chosen]))));
   }
-  async function startSignIn(account, operations) {
-    // Open the tab inside the click so it is not blocked, then point it at Google.
+  function accountSheet(a) {
+    const input = el('input', null, 'wz-field', { value: a.label || '', placeholder: 'Work, Personal…', 'aria-label': 'Name', maxlength: '40', enterkeyhint: 'done' });
+    const form = el('form', null, 'label-form'); form.append(input);
+    const save = async () => { try { await api(`api/accounts/${a.id}/label`, { label: input.value }); sheetClose(); await refresh(); say('Saved.', true); } catch (e) { say(e.message); } };
+    form.onsubmit = e => { e.preventDefault(); save(); };
+    const chips = el('div', null, 'chips');
+    for (const name of ['Work', 'Personal']) chips.append(button(name, () => { input.value = name; save(); }, 'wz-chip'));
+    openSheet(a.email || 'Google account',
+      el('p', 'Name it so you and your agent can tell accounts apart.', 'muted'), form, chips,
+      actionsOf(button('Save name', save, 'wz-button secondary'),
+        button('Sign in again', () => startSignIn(a, a.services.filter(s => s.on).map(s => s.id)), 'wz-button secondary'),
+        button('Disconnect', () => confirmDisconnect(a), 'wz-button secondary danger')));
+  }
+  function confirmDisconnect(a) {
+    openSheet(`Disconnect ${a.email}?`, el('p', 'Wizard forgets this sign-in, your agent and apps lose access to it, and Google is asked to revoke it.', 'muted'),
+      actionsOf(button('Disconnect', async () => {
+        try {
+          const out = await api(`api/accounts/${a.id}/disconnect`, {}); sheetClose();
+          say(out.revoked_at_google ? 'Disconnected.' : 'Disconnected here. Remove Wizard at myaccount.google.com/connections too.', true); await refresh();
+        } catch (e) { say(e.message); }
+      }, 'wz-button danger'), button('Cancel', sheetClose, 'wz-button secondary')));
+  }
+  function signInSheet() {
+    const wizard = home.sign_in.wizard_available || home.sign_in.mode === 'wizard';
+    const list = el('div', null, 'wz-list');
+    list.append(row('Wizard\'s Google app', wizard ? 'Quickest. Nothing to set up: just sign in.' : 'Not available right now', wizard && home.sign_in.mode !== 'wizard' ? async () => {
+      try { await api('api/setup/wizard', {}); sheetClose(); await refresh(); } catch (e) { say(e.message); }
+    } : null, '✦', home.sign_in.mode === 'wizard' ? pill('ok', 'In use') : null));
+    list.append(row('Your own Google client', 'About ten minutes in Google Cloud. Nobody else\'s Google app is involved.', () => { sheetClose(); go({ kind: 'setup' }); }, '⚙',
+      home.sign_in.mode === 'own' ? pill('ok', 'In use') : null));
+    openSheet('How Wizard signs in to Google', list,
+      el('p', home.accounts.length ? 'Disconnect your accounts before changing this: each sign-in belongs to the Google app that made it.' : 'Either way, your sign-ins and data stay on this box.', 'muted'));
+  }
+
+  async function startSignIn(account, services) {
+    // Open the tab inside the tap so it is not blocked, then point it at Google.
     const tab = window.open('', '_blank');
     try {
-      const out = await api('api/oauth/start', { account: account ? account.id : null, operations });
+      const out = await api('api/oauth/start', { account: account ? account.id : null, services });
       if (tab) { tab.opener = null; tab.location.href = out.authorization_url; }
-      // Google cannot open inside a frame. If the tab was blocked, this link opens it with one more tap.
-      openSheet('Finish in the Google tab', el('p', 'Choose your account and allow access. If Google says the app is not verified, choose Advanced, then “Go to Wizard”. It is your own app.', 'muted'),
+      openSheet('Finish in the Google tab', el('p', 'Choose your account and press Continue or Allow. When Google sends you back, tap Return to Wizard. This page updates by itself.', 'muted'),
         el('div', null, 'spinner', { 'aria-hidden': 'true' }),
         actionsOf(link(tab ? 'Open Google again ↗' : 'Open Google ↗', out.authorization_url, tab ? 'wz-button secondary' : 'wz-button'),
           button('Cancel', async () => { await api('api/oauth/cancel', {}).catch(() => {}); sheetClose(); }, 'wz-button secondary')));
@@ -348,7 +375,8 @@
         const s = await api('api/oauth/status');
         if (mine !== seq) return;
         if (s.status === 'connected') {
-          stopPolling(); sheetClose(); say(`Connected ${s.result.email}.`, true);
+          stopPolling(); sheetClose();
+          say(s.result.declined_services?.length ? `Connected ${s.result.email}. Google did not allow everything; switch it on again to retry.` : `Connected ${s.result.email}.`, true);
           await api(`api/accounts/${s.result.account}/check`, {}).catch(() => {});
           await refresh();
         } else if (s.status === 'failed' || s.status === 'cancelled') { stopPolling(); sheetClose(); if (s.status === 'failed') say(s.result.message); }
@@ -357,24 +385,20 @@
   }
   function stopPolling() { if (polling) { clearInterval(polling); polling = null; } }
   function chooseAccountSheet(r) {
-    openSheet(`${r.label}: which account?`, ...home.accounts.map(a => row(a.email, null, () => decide(r, true, a.id), initial(a.email))),
-      actionsOf(button('Cancel', back, 'wz-button secondary')));
+    openSheet(`${r.label}: which account?`, ...home.accounts.map(a => row(a.label || a.email, a.label ? a.email : null, () => decide(r, true, a.id), initial(a.email))));
   }
   function newCallerSheet() {
-    const input = el('input', null, 'wz-input', { placeholder: 'App id, e.g. music', 'aria-label': 'App id', autocapitalize: 'off', spellcheck: 'false' });
+    const input = el('input', null, 'wz-field', { placeholder: 'App id, e.g. music', 'aria-label': 'App id', autocapitalize: 'off', spellcheck: 'false' });
     const form = el('form'); form.append(input);
     form.onsubmit = e => { e.preventDefault(); const id = input.value.trim().toLowerCase(); if (/^[a-z0-9][a-z0-9_-]{0,62}$/.test(id)) { sheetClose(); go({ kind: 'caller', id: 'app:' + id }); } else say('Use the app id from its Wizard listing.'); };
-    openSheet('Give an app access', el('p', 'Apps usually ask by themselves; their request appears on the home screen. To set it up ahead, type the app id.', 'muted'), form,
-      actionsOf(button('Next', () => form.requestSubmit()), button('Cancel', back, 'wz-button secondary')));
-  }
-  function confirmSheet(title, text, action, run) {
-    openSheet(title, el('p', text, 'muted'), actionsOf(button(action, async () => { try { await run(); sheetClose(); } catch (e) { say(e.message); } }, 'wz-button danger'),
-      button('Cancel', back, 'wz-button secondary')));
+    openSheet('Give an app access', el('p', 'Apps usually ask by themselves; their request appears here. To set it up ahead, type the app id.', 'muted'), form,
+      actionsOf(button('Next', () => form.requestSubmit())));
   }
 
   // ---------- start ----------
   addEventListener('focus', () => { if (csrf && !sheet.open) refresh().catch(() => {}); });
+  document.addEventListener('visibilitychange', () => { if (csrf && document.visibilityState === 'visible' && !sheet.open) refresh().catch(() => {}); });
   fetch('api/session', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-Wizard-Request': 'bootstrap' }, body: '{}' })
-    .then(async r => { const v = await r.json(); if (!r.ok) throw new Error(v.error?.message || 'Unavailable.'); csrf = v.csrf; await refresh(); guardHistory(); })
+    .then(async r => { const v = await r.json(); if (!r.ok) throw new Error(v.error?.message || 'Unavailable.'); csrf = v.csrf; await refresh(); })
     .catch(e => { view.replaceChildren(el('div', null, 'wz-empty')); view.firstChild.append(el('strong', 'Google is not available'), el('p', e.message)); });
 })();

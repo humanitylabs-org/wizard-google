@@ -46,9 +46,54 @@ APIS = {
     'gmail.googleapis.com': 'Gmail API',
     'calendar-json.googleapis.com': 'Google Calendar API',
     'drive.googleapis.com': 'Google Drive API',
+    'docs.googleapis.com': 'Google Docs API',
+    'sheets.googleapis.com': 'Google Sheets API',
+    'slides.googleapis.com': 'Google Slides API',
     'people.googleapis.com': 'People API',
     'youtube.googleapis.com': 'YouTube Data API v3',
 }
+
+# The services the owner switches on per account for their agent. Scopes follow gogcli's own
+# `gog auth services` map (so every gog command in the service works), minus Gmail's
+# delegation/forwarding scope. `commands` are the gog command roots the service unlocks.
+SERVICES = {
+    'gmail': {'label': 'Gmail', 'what': 'Search, read, draft, send and label mail',
+              'scopes': [SCOPE + 'gmail.modify', SCOPE + 'gmail.settings.basic'],
+              'commands': ['gmail'], 'apis': ['gmail.googleapis.com']},
+    'calendar': {'label': 'Calendar', 'what': 'See, add and change events',
+                 'scopes': [SCOPE + 'calendar'], 'commands': ['calendar'], 'apis': ['calendar-json.googleapis.com']},
+    'drive': {'label': 'Drive, Docs and Sheets', 'what': 'Find, read, create and edit files, documents and spreadsheets',
+              'scopes': [SCOPE + 'drive', SCOPE + 'documents', SCOPE + 'spreadsheets', SCOPE + 'presentations'],
+              'commands': ['drive', 'docs', 'sheets', 'slides'],
+              'apis': ['drive.googleapis.com', 'docs.googleapis.com', 'sheets.googleapis.com', 'slides.googleapis.com']},
+    'contacts': {'label': 'Contacts', 'what': 'Look up, add and update contacts',
+                 'scopes': [SCOPE + 'contacts', SCOPE + 'contacts.other.readonly'],
+                 'commands': ['contacts', 'people'], 'apis': ['people.googleapis.com']},
+    'youtube': {'label': 'YouTube', 'what': 'Search videos, read your playlists, subscriptions and comments',
+                'scopes': [SCOPE + 'youtube.readonly'], 'commands': ['youtube'], 'apis': ['youtube.googleapis.com']},
+}
+DEFAULT_SERVICES = ('gmail', 'calendar', 'drive', 'contacts')
+
+# A broader scope Google granted covers the narrower ones the typed operations ask for.
+IMPLIED = {
+    SCOPE + 'gmail.readonly': {'https://mail.google.com/', SCOPE + 'gmail.modify'},
+    SCOPE + 'gmail.send': {'https://mail.google.com/', SCOPE + 'gmail.modify', SCOPE + 'gmail.compose'},
+    SCOPE + 'calendar.readonly': {SCOPE + 'calendar', SCOPE + 'calendar.events'},
+    SCOPE + 'calendar.events': {SCOPE + 'calendar'},
+    SCOPE + 'drive.metadata.readonly': {SCOPE + 'drive', SCOPE + 'drive.readonly'},
+    SCOPE + 'drive.readonly': {SCOPE + 'drive'},
+    SCOPE + 'contacts.readonly': {SCOPE + 'contacts'},
+    SCOPE + 'youtube.readonly': {SCOPE + 'youtube', SCOPE + 'youtube.force-ssl'},
+}
+
+
+def has_scope(granted, scope):
+    granted = set(granted or ())
+    return scope in granted or bool(IMPLIED.get(scope, set()) & granted)
+
+
+def service_granted(granted, service):
+    return all(has_scope(granted, s) for s in SERVICES[service]['scopes'])
 # A cheap read per API, used to tell "API not enabled" apart from "not allowed".
 API_PROBES = {
     'gmail.googleapis.com': ('gmail.search', GMAIL + '/profile'),
@@ -123,12 +168,14 @@ def classify(status, payload):
 
 
 class Transport:
-    def __init__(self):
+    def __init__(self, extra_hosts=()):
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+        # The Wizard sign-in service (only when the owner uses Wizard's Google app).
+        self.hosts = ALLOWED_HOSTS | {h for h in extra_hosts if h}
 
     def request(self, method, url, *, token=None, form=None, body=None, raw=False):
         parts = urllib.parse.urlsplit(url)
-        if parts.scheme != 'https' or parts.hostname not in ALLOWED_HOSTS or parts.username or parts.fragment:
+        if parts.scheme != 'https' or parts.hostname not in self.hosts or parts.username or parts.fragment:
             raise GoogleError('transport_policy', 500, 'Endpoint refused.')
         headers = {'Accept': 'application/json', 'User-Agent': 'wizard-google'}
         data = None

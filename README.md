@@ -1,27 +1,21 @@
-# Google for Wizard (prototype)
+# Google for Wizard
 
-Gmail, Calendar, Drive, Contacts and YouTube for your Wizard, signed in with **your own Google Cloud OAuth client**. No AI Wizards server sits in the middle: Google sends the sign-in back to your box, the box exchanges it with your client secret and a PKCE verifier, and the tokens never leave the box. Only this app ever holds a Google token; other apps and agents get typed operations on the accounts you allow, and nothing else.
+Gmail, Calendar, Drive (with Docs and Sheets), Contacts and YouTube for your Wizard agent. Sign in once per Google account, then switch on, per account, what your agent may use. Several accounts side by side (work and personal).
 
-Status: **prototype on branch `feature/byo-google-client`.** Tested against a fake Google (see "What is proven"). Not published to the app index; no image is published.
+- **Quick sign-in (default):** Connect Google → tick services → sign in on Google → Return to Wizard. Uses Wizard's shared Google app through the stateless sign-in service in [`relay/`](relay/worker.mjs). Why, and what Google verification it needs: [docs/OAUTH_DECISION.md](docs/OAUTH_DECISION.md).
+- **Your own Google client (optional):** the original 7-step flow, [docs/SETUP_FLOW.md](docs/SETUP_FLOW.md). No shared Google app involved.
+- **Agents use gog.** MCP `google_run` runs one [gogcli](https://github.com/steipete/gogcli) command (pinned v0.45.0, SHA-256 checked at build) with a fresh access token for one account and `--enable-commands` set to the services the owner switched on. gog runs in an empty temp folder with no refresh token, secret or app data. `google_status` and `google_help` (gog's own command schema) complete the set.
+- **Apps** keep typed operations per account and operation at `/consumer/v1` (Wizard grant or access key), as in 0.1.
+- **Status for the shell** at `GET /api/connection` (`wizard.google-connection/1`; never a token).
 
-## What it does
-
-- **Setup inside the app**: 7 counted steps, 5 of them short visits to Google Cloud, each deep-linked with the values to paste. The design and the reasons are in [docs/SETUP_FLOW.md](docs/SETUP_FLOW.md). The agent can walk you through the same steps (`google_setup_guide`).
-- **Several Google accounts**, each with its own Google permissions (granular consent respected; "Allow more…" adds scopes later).
-- **Grants per app and per agent, per account, per operation.** Operations: `gmail.search`, `gmail.read`, `gmail.send`, `calendar.read`, `calendar.write`, `drive.search`, `drive.read`, `contacts.read`, `youtube.read`. Nothing is allowed by default. Apps and agents can ask (`google_request_access`, `POST /consumer/v1/request`); the request waits on the home screen for Allow / Decline.
-- **Callers**:
-  - Agents through MCP at `/mcp` (box-only). The Agent Service gateway names the agent with `X-Wizard-Agent`; no name means the main agent.
-  - Apps through `/consumer/v1` with their App Manager grant (`X-Wizard-Grant`, [PR #6](https://github.com/humanitylabs-org/wizard-os/pull/6) `grants.json`), or an access key you make in the app for apps installed before grants exist.
-- **Status for the shell** at `GET /api/connection` (`wizard.google-connection/1`, the same shape as the AI connection apps; never a token).
-
-## Install (when published)
+## Install
 
 The recipe needs only your Wizard shell's owner settings (same as other external apps):
 
 - `WIZARD_OWNER_LOGINS`: your Tailscale login.
 - `WIZARD_TRUSTED_HOSTS` / `WIZARD_TRUSTED_ORIGINS`: your shell's exact host(s) and `https://` origin(s).
 
-Google client values are **not** install-form fields: you paste the client file inside the app, where it is checked and stored encrypted.
+Nothing about Google is an install-form field. Quick sign-in needs nothing; an own client is pasted inside the app, checked and stored encrypted. `GOOGLE_SIGNIN_SERVICE=off` allows only own clients.
 
 ## Where the data lives, and moving boxes
 
@@ -49,10 +43,11 @@ The key sits next to the data so a move needs no extra step. Encryption at rest 
 ## Development
 
 ```sh
-PYTHONPATH=app:tests python3 -m unittest discover -s tests -v   # broker, HTTP, MCP, consumer API, packaging (fake Google)
-node relay/test.mjs                                             # stateless return page
+PYTHONPATH=app:tests python3 -m unittest discover -s tests -v   # broker, quick sign-in, services, gog gate, HTTP, MCP, packaging (fake Google)
+GOG_TEST_BIN=/path/to/gog PYTHONPATH=app:tests python3 -m unittest tests.test_services.RealGog   # the real gog binary
+node relay/test.mjs                                             # sign-in service: return page, client info, token passthrough
 PLAYWRIGHT_PATH=…/playwright node qa/browser.cjs                # real browser: skins, Back, setup (fake Google)
-python3 qa/preview.py --scenario connected --port 18890         # look at it: http://127.0.0.1:18890/__qa/host.html?skin=grove
+python3 qa/preview.py --scenario quick-connected --port 18890 --core <wizard-ux>/web/core   # look at it: http://127.0.0.1:18890/__qa/host.html?skin=grove
 docker build -f app/Dockerfile .
 ```
 
