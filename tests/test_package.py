@@ -32,7 +32,7 @@ class Package(unittest.TestCase):
         canonical = ROOT.parent.parent / 'conn-inv' / 'wizard-os' / 'style'
         if not canonical.exists():
             self.skipTest('wizard-os clone not present')
-        for name in ('boot.js', 'appearance-client.js', 'tokens.css', 'ui.css'):
+        for name in ('boot.js', 'sheet.js', 'tokens.css', 'ui.css'):
             self.assertEqual((ROOT / 'web' / name).read_bytes(), (canonical / name).read_bytes(), name)
 
     def test_wizard_md_passes_the_checker(self):
