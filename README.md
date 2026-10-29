@@ -2,8 +2,8 @@
 
 Gmail, Calendar, Drive (with Docs and Sheets), Contacts and YouTube for your Wizard agent. Sign in once per Google account, then switch on, per account, what your agent may use. Several accounts side by side (work and personal).
 
-- **Quick sign-in (default):** Connect Google → tick services → sign in on Google → Return to Wizard. Uses Wizard's shared Google app through the stateless sign-in service in [`relay/`](relay/worker.mjs). Why, and what Google verification it needs: [docs/OAUTH_DECISION.md](docs/OAUTH_DECISION.md).
-- **Your own Google client (optional):** the original 7-step flow, [docs/SETUP_FLOW.md](docs/SETUP_FLOW.md). No shared Google app involved.
+- **Your own Google client (works today):** the 7-step flow in [docs/SETUP_FLOW.md](docs/SETUP_FLOW.md). No shared Google app involved.
+- **Quick sign-in (built, switched off):** Connect Google → tick services → sign in on Google → Return to Wizard, through Wizard's shared Google app and the sign-in service in [`relay/`](relay/worker.mjs). The service is not deployed, so the app falls back to own clients. Status, trade-offs and open security items: [docs/OAUTH_DECISION.md](docs/OAUTH_DECISION.md).
 - **Agents use gog.** MCP `google_run` runs one [gogcli](https://github.com/steipete/gogcli) command (pinned v0.45.0, SHA-256 checked at build) with a fresh access token for one account and `--enable-commands` set to the services the owner switched on. gog runs in an empty temp folder with no refresh token, secret or app data. `google_status` and `google_help` (gog's own command schema) complete the set.
 - **Apps** keep typed operations per account and operation at `/consumer/v1` (Wizard grant or access key), as in 0.1.
 - **Status for the shell** at `GET /api/connection` (`wizard.google-connection/1`; never a token).
@@ -15,7 +15,7 @@ The recipe needs only your Wizard shell's owner settings (same as other external
 - `WIZARD_OWNER_LOGINS`: your Tailscale login.
 - `WIZARD_TRUSTED_HOSTS` / `WIZARD_TRUSTED_ORIGINS`: your shell's exact host(s) and `https://` origin(s).
 
-Nothing about Google is an install-form field. Quick sign-in needs nothing; an own client is pasted inside the app, checked and stored encrypted. `GOOGLE_SIGNIN_SERVICE=off` allows only own clients.
+Nothing about Google is an install-form field. Quick sign-in would need nothing; an own client is pasted inside the app, checked and stored encrypted. `GOOGLE_SIGNIN_SERVICE=off` allows only own clients.
 
 ## Where the data lives, and moving boxes
 
