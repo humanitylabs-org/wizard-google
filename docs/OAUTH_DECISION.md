@@ -1,6 +1,12 @@
-# How Wizard signs in to Google (decision, 27 Oct 2026)
+# How Wizard signs in to Google
 
-## Recommendation: Wizard's own Google app by default, the owner's own client as an option
+## Status (29 Oct 2026): own client only; shared sign-in not approved
+
+The owner's own Google client is the only active flow. The shared sign-in service below is built but not deployed, and the app falls back to own clients when it is unreachable. James has not approved a shared Wizard sign-in: running one only to save a few known owners ten minutes is low value, and the requirement is onboarding that scales. Under evaluation ([issue #7](https://github.com/humanitylabs-org/wizard-google/issues/7)): a third-party managed connection service (for example Pipedream Connect or Composio) as an optional easy path, versus a properly verified Wizard-owned service, with own client kept as the independent option. Activating the relay needs a new decision.
+
+The rest of this page is the original 27 Oct proposal, kept for reference, with corrections.
+
+## Original proposal: Wizard's own Google app by default, the owner's own client as an option
 
 | | Wizard's Google app (default) | Owner's own Google client (option) |
 |---|---|---|
@@ -10,7 +16,14 @@
 | Google review | Needed before more than 100 owners (see below). | None: personal-use apps under 100 users are exempt. Owner sees "Google hasn't verified this app" once. |
 | Risk we carry | One client for every owner: if Google suspends it, every owner re-connects. We must keep the Limited Use promises and pass the yearly security assessment. | Per owner. |
 
-Why the secret stays in the service: a Google **web** client's secret must stay confidential, so it cannot ship inside a public app image. The service adds it to the box's code exchange and token refresh. It cannot use a code by itself (PKCE: the verifier never leaves the box) and keeps nothing it passes along.
+Why the secret stays in the service: a Google **web** client's secret must stay confidential, so it cannot ship inside a public app image. The service adds it to the box's code exchange and token refresh. The relay code persists nothing it passes along, but OAuth credentials do pass through it: the box sends the PKCE verifier with the code exchange, and every refresh token on each renewal, and the token responses come back through it. So "tokens never leave the box" is wrong; the accurate claim is "tokens are stored only on the box and not persisted by the relay code". A compromised relay could capture them.
+
+### Open security items before any activation
+
+- The return page checks the destination address's syntax only, not that it belongs to a registered box, and the token endpoint does not authenticate the box. Anyone could ride the shared client to run consent screens in Wizard's name. Needs box registration or signed state before go-live.
+- One shared client: if Google suspends it, every owner on it is cut off, and reconnecting to the same client does not fix it.
+- The 100-user cap for unverified sensitive/restricted scopes is for the project's lifetime and is not a compliance exemption for a commercial pilot. Restricted-scope verification and the yearly assessment are an ongoing duty, priced by Google's assigned tier and an assessor's quote.
+- An isolated AI reader in front of Gmail lowers prompt-injection risk but guarantees nothing and does not by itself meet Google's data-use rules.
 
 ## What Google verification the default needs
 
