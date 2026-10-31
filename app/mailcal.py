@@ -8,6 +8,7 @@ import base64
 import html
 import re
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from email.message import EmailMessage
 from email.utils import getaddresses, parsedate_to_datetime
 
@@ -104,12 +105,16 @@ def mail_search(call, args):
     if args.get('page_token'):
         params['pageToken'] = _id(args, 'page_token', r'[A-Za-z0-9_-]{1,256}')
     listing = call('GET', f'{GMAIL}/messages', params)
-    found = []
-    for item in (listing.get('messages') or [])[:limit]:
-        mid = str(item.get('id', ''))
-        if re.fullmatch(MID, mid):
-            found.append(_summary(call('GET', f'{GMAIL}/messages/{mid}', {
-                'format': 'metadata'})))  # no metadataHeaders: Composio's proxy keeps only the last repeated value
+    ids = [str(item.get('id', '')) for item in (listing.get('messages') or [])[:limit]]
+    ids = [mid for mid in ids if re.fullmatch(MID, mid)]
+
+    def summary(mid):
+        # no metadataHeaders: Composio's proxy keeps only the last repeated query value
+        return _summary(call('GET', f'{GMAIL}/messages/{mid}', {'format': 'metadata'}))
+
+    # One request per message; run them side by side (a page took ~15 s one after another through Composio).
+    with ThreadPoolExecutor(max_workers=min(8, len(ids) or 1)) as pool:
+        found = list(pool.map(summary, ids))
     return {'folder': folder, 'messages': found, 'next_page_token': listing.get('nextPageToken'), 'untrusted': UNTRUSTED}
 
 
