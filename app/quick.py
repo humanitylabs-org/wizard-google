@@ -87,8 +87,8 @@ class Quick:
                     if any(a.get('key_id') == key_id and ca in a.get('links', {}).values()
                            for a in current.values()):
                         continue
-                    self.keys().client(key_id).remove(ca, revoke=False)
-                    removed += 1
+                self.keys().client(key_id).remove(ca, revoke=False)
+                removed += 1
             except Exception:
                 pass
         return removed
@@ -284,9 +284,8 @@ class Quick:
     # ---------- calls ----------
     def _caller(self, a, service):
         """`call(method, url, query, body)` for mailcal, signed by Composio, counted per key."""
-        keys = self.keys()
         try:
-            client = keys.client(a['key_id'])
+            client = self.keys().client(a['key_id'])
         except composio.ComposioError:
             raise google.GoogleError('reauth_required', 409, 'The Composio key for this account was removed. Add it again.') from None
         ca = a['links'].get(service)
@@ -298,18 +297,19 @@ class Quick:
                 status, data = client.proxy(a['user_id'], ca, method, url, query, body)
             except composio.ComposioError as error:
                 if error.code in ('key_invalid', 'key_forbidden', 'quota'):
-                    keys.mark(a['key_id'], error.code, error.message)
+                    self.keys().mark(a['key_id'], error.code, error.message)
                 if error.code in ('not_found', 'rejected') and self._gone(client, ca):
-                    self._mark(a, 'reauth_required')
+                    self._mark(a, 'reauth_required', service, ca)
                     raise google.GoogleError('reauth_required', 409, 'Composio no longer has this sign-in. Quick connect again.') from None
                 raise google.GoogleError('provider_unavailable' if error.code == 'unavailable' else 'composio_' + error.code,
                                          error.status, error.message) from None
             finally:
-                keys.count(a['key_id'])
+                # tidy/_mark can replace the stored state while this caller is in flight.
+                self.keys().count(a['key_id'])
             if status >= 400:
                 failure = google.classify(status, data if isinstance(data, dict) else {})
                 if failure.code == 'token_rejected':
-                    self._mark(a, 'reauth_required')
+                    self._mark(a, 'reauth_required', service, ca)
                     failure = google.GoogleError('reauth_required', 409, 'Google ended this sign-in. Quick connect again.')
                 raise failure
             return data if isinstance(data, dict) else {}
@@ -321,11 +321,17 @@ class Quick:
         except composio.ComposioError as error:
             return error.code == 'not_found'
 
-    def _mark(self, a, status):
+    def _mark(self, a, status, service, connection_id):
+        # The profile lookup during sign-in uses a temporary account not yet saved by ID.
+        account_id = a.get('id')
+        if not isinstance(account_id, str) or not account_id:
+            return
         with self.broker.lock:
             state = self.broker._copy()
-            current = state.get('quick', {}).get('accounts', {}).get(a['id'])
+            current = state.get('quick', {}).get('accounts', {}).get(account_id)
             if not current or any(current.get(key) != a.get(key) for key in ('key_id', 'user_id')):
+                return
+            if current.get('links', {}).get(service) != connection_id:
                 return
             current['status'] = status
             self.broker._commit(state)

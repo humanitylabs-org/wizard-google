@@ -97,6 +97,49 @@ class TidyPreservationTests(unittest.TestCase):
         self.assertEqual(self.broker.state['quick']['accounts']['new']['status'], 'reauth_required')
         self.assertEqual(self.saved[-1]['quick']['accounts']['new']['status'], 'reauth_required')
 
+    def test_old_connection_failure_does_not_mark_reconnected_account(self):
+        import google
+        self.account('new', 'gmail')
+        self.state['quick']['accounts']['new']['status'] = 'active'
+        caller = self.quick._caller(self.state['quick']['accounts']['new'], 'gmail')
+        replacement = copy.deepcopy(self.broker.state)
+        replacement['quick']['accounts']['new']['links']['gmail'] = 'reconnected'
+        self.broker.state = replacement
+        self.client.proxy.return_value = (401, {'error': {'message': 'Invalid Credentials'}})
+        with self.assertRaises(google.GoogleError):
+            caller('GET', 'https://gmail.googleapis.com/gmail/v1/users/me/messages')
+        self.assertEqual(self.broker.state['quick']['accounts']['new']['status'], 'active')
+
+    def test_inflight_key_counter_stays_attached_after_tidy_replaces_state(self):
+        import composio
+        self.account('old', 'gmail')
+        self.account('new', 'gmail', added=2)
+        self.state['quick']['keys'] = [{'id': 'key-one', 'calls': {}}]
+        def live_keys():
+            keys = composio.Keys(self.quick.section(), lambda: self.broker._commit(self.broker.state))
+            keys.client = lambda key: self.client
+            return keys
+        self.quick.keys = live_keys
+        caller = self.quick._caller(self.state['quick']['accounts']['new'], 'gmail')
+        self.quick.tidy()
+        self.client.proxy.return_value = (200, {})
+        caller('GET', 'https://gmail.googleapis.com/gmail/v1/users/me/messages')
+        self.assertEqual(sum(self.broker.state['quick']['keys'][0]['calls'].values()), 1)
+        self.assertEqual(sum(self.saved[-1]['quick']['keys'][0]['calls'].values()), 1)
+
+    def test_temporary_profile_caller_without_account_id_preserves_provider_error(self):
+        import google
+        import mailcal
+        temporary = {'key_id': 'key-one', 'user_id': 'user-one',
+                     'links': {'gmail': 'temporary-connection'}}
+        self.client.proxy.return_value = (401, {'error': {'message': 'Invalid Credentials'}})
+        caller = self.quick._caller(temporary, 'gmail')
+        with self.assertRaises(google.GoogleError) as caught:
+            mailcal.profile_email(caller, 'gmail')
+        self.assertEqual(caught.exception.code, 'reauth_required')
+        self.assertEqual(self.saved, [])
+        self.assertEqual(self.broker.state, self.state)
+
     def test_another_retained_account_prevents_remote_connection_delete(self):
         self.account('old', 'gmail', link='shared-connection')
         self.account('new', 'gmail', added=2)
