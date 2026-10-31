@@ -132,6 +132,14 @@ class LoopbackOwner(unittest.TestCase):
         found = agent.mcp('google_run', {'args': ['gmail', 'search', 'lunch']})
         self.assertEqual((found['account'], found['exit_code']), ('owner@gmail.com', 0))
         self.assertEqual(self.app.broker.gog.runs[-1]['roots'], ['gmail'])
+        # Draft only: gog itself refuses sending, replying, forwarding and mail settings for agents.
+        extra = self.app.broker.gog.runs[-1]['extra']
+        self.assertIn('--gmail-no-send', extra)
+        self.assertIn('gmail.settings', ''.join(extra))
+        self.assertNotIn('--readonly', extra)
+        for flag in ('--gmail-no-send=false', '--no-gmail-no-send', '--readonly=false', '--disable-commands='):
+            refused = agent.mcp('google_run', {'args': ['gmail', 'send', '--to', 'a@example.com', flag]})
+            self.assertEqual(refused['error']['code'], 'flag_refused', flag)
         # Switching it off stops the agent at once.
         status, _, _ = self.owner.send('POST', f'/api/accounts/{account}/service', {'service': 'gmail', 'on': False})
         self.assertEqual(status, 200)
@@ -166,7 +174,47 @@ class LoopbackOwner(unittest.TestCase):
             self.assertEqual(status, 403, headers)
         status, value, _ = c.send('POST', '/mcp', {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'}, browser=False)
         names = {t['name'] for t in value['result']['tools']}
-        self.assertEqual(names, {'google_status', 'google_run', 'google_help'})
+        # Agents never see mail_send (Draft only is the highest agent level; the owner sends from Mail).
+        self.assertEqual(names, {'google_status', 'google_run', 'google_help', 'mail_search', 'mail_get', 'mail_draft', 'mail_update',
+                                 'calendar_list_events', 'calendar_create_event', 'calendar_update_event', 'calendar_delete_event',
+                                 'calendar_respond'})
+
+    def test_3b_agents_cannot_send_and_only_the_owner_sets_the_level(self):
+        token = 'grant-token-for-wizard-mail-app'
+        self.grants_file.write_text(json.dumps({'incoming': [{'from': 'wizard-mail', 'sha256': hashlib.sha256(token.encode()).hexdigest()},
+                                                             {'from': 'host:agent-service', 'sha256': hashlib.sha256(b'gateway-grant-token-123').hexdigest()}]}))
+        c = Client(self.port)
+        call = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call', 'params': {'name': 'mail_send', 'arguments': {'draft_id': 'd1'}}}
+        # An agent: MCP and the box-only /v1 mirror both refuse, also when it names itself after Mail or forges a grant.
+        for headers in ({}, {'X-Wizard-Agent': 'wizard-mail'}, {'X-Wizard-Grant': 'forged-grant-token-000'},
+                        {'X-Wizard-Grant': 'gateway-grant-token-123'}):
+            status, value, _ = c.send('POST', '/mcp', call, headers, browser=False)
+            self.assertEqual((status, value['result']['isError'], value['result']['structuredContent']['error']['code']),
+                             (200, True, 'agent_send_refused'), headers)
+            status, value, _ = c.send('POST', '/v1/mail_send', {'draft_id': 'd1'}, headers, browser=False)
+            self.assertEqual((status, value['error']['code']), (403, 'agent_send_refused'), headers)
+        # Mail with its grant (sent only for the owner's taps) passes the lock and reaches the account check.
+        status, value, _ = c.send('POST', '/v1/mail_send', {'draft_id': 'd1'}, {'X-Wizard-Grant': token}, browser=False)
+        self.assertNotEqual(value['error']['code'], 'agent_send_refused')
+        # The level: the owner reads and sets it; agents and bearer callers cannot.
+        status, value, _ = self.owner.send('GET', '/api/mail-settings')
+        self.assertEqual((status, value['agent_access']['mail']), (200, 'draft_only'))
+        self.assertEqual([x['id'] for x in value['agent_access']['levels']], ['no_access', 'read_only', 'draft_only'])
+        status, _, _ = c.send('POST', '/api/agent-access', {'mail': 'read_only'}, browser=False)
+        self.assertIn(status, (401, 403))
+        status, _, _ = self.owner.send('POST', '/api/agent-access', {'mail': 'read_only'}, {'Authorization': 'Bearer x'})
+        self.assertEqual(status, 403)
+        status, _, _ = self.owner.send('POST', '/api/agent-access', {'mail': 'read_only'}, {'X-CSRF-Token': 'wrong'})
+        self.assertEqual(status, 403)
+        status, _, _ = self.owner.send('POST', '/api/agent-access', {'mail': 'draft_and_send'})
+        self.assertEqual(status, 400)
+        status, value, _ = self.owner.send('POST', '/api/agent-access', {'mail': 'read_only'})
+        self.assertEqual((status, value['agent_access']['mail']), (200, 'read_only'))
+        status, value, _ = c.send('POST', '/v1/mail_draft', {'to': ['a@example.com'], 'body': 'x'}, browser=False)
+        self.assertEqual((status, value['error']['code']), (403, 'agent_access_denied'))
+        status, value, _ = self.owner.send('POST', '/api/agent-access', {'mail': 'draft_only'})
+        self.assertEqual(value['agent_access']['mail'], 'draft_only')
+        self.grants_file.write_text('{}')
 
     def test_4_owner_writes_need_csrf_and_same_origin(self):
         status, _, _ = self.owner.send('POST', '/api/setup/step', {'step': 'publish', 'done': True}, {'X-CSRF-Token': 'wrong'})
