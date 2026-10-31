@@ -461,6 +461,16 @@ class SignInFlowTests(QuickBase):
         self.assertEqual([k['key'] for k in self.quick.section()['keys']], [SECOND])
         self.assertEqual(self.fake.minted, [])
 
+    def test_session_info_key_composio_refuses_falls_back_to_a_minted_key(self):
+        self.fake.info_key = 'ak_not_accepted_by_composio_123'  # e.g. a playground key /connected_accounts refuses
+        self.quick.guide.signin.sleep = lambda s: None
+        flow = self.quick.flow_begin('s1', ['gmail'])['flow']
+        self.step(flow)
+        self.fake.link_signin()
+        view, _ = self.step(flow)
+        self.assertEqual(view['step'], 'gmail', view)
+        self.assertEqual([k['key'] for k in self.quick.section()['keys']], [MINTED])
+
     def test_saved_key_skips_composio_sign_in(self):
         self.quick.add_key(GOOD)
         flow = self.quick.flow_begin('s1', ['calendar'])['flow']
