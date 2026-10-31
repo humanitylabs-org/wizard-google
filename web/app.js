@@ -5,7 +5,7 @@
 (() => {
   const $ = id => document.getElementById(id);
   const view = $('view'), sheet = $('sheet'), status = $('status');
-  let csrf = null, home = null, stack = [], polling = null, seq = 0, busy = false;
+  let csrf = null, home = null, stack = [], polling = null, seq = 0, busy = false, queue = [];
   const CHECK = '<i><svg viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg></i>';
 
   // ---------- small DOM helpers ----------
@@ -64,7 +64,7 @@
   function go(next) { stack.push(next); sheetClose(); say(''); render(); view.scrollTop = 0; }
   function back() { if (!stack.length) return false; stack.pop(); render(); return true; }
   if (window.WizardApp?.version === 1) {
-    WizardApp.ready({ name: 'wizard-google', version: '0.2.0' });
+    WizardApp.ready({ name: 'wizard-google', version: '0.3.0' });
     WizardApp.back.register({ canGoBack: () => stack.length > 0, back });
   }
 
@@ -75,6 +75,7 @@
     view.replaceChildren();
     if (!top) return renderHome();
     if (top.kind === 'setup') return renderSetup();
+    if (top.kind === 'quick') return renderQuick();
     if (top.kind === 'caller') return renderCaller(top.id);
   }
   function crumb(title) {
@@ -83,10 +84,11 @@
     return c;
   }
 
+  const allAccounts = () => [...home.accounts, ...home.quick.accounts];
   function overall() {
-    const active = home.accounts.filter(a => a.status === 'active');
-    if (!home.accounts.length) return ['off', 'Not connected'];
-    if (active.length < home.accounts.length) return ['warn', 'Needs attention'];
+    const all = allAccounts(), active = all.filter(a => a.status === 'active');
+    if (!all.length) return ['off', 'Not connected'];
+    if (active.length < all.length) return ['warn', 'Needs attention'];
     return ['ok', 'Connected'];
   }
   function servicesLine(a) {
@@ -102,9 +104,10 @@
     const tile = el('span', null, 'wz-tile sigil', { 'aria-hidden': 'true' }); tile.append(el('img', null, null, { src: 'icon.png', alt: '' }));
     const main = el('span', null, 'wz-main');
     const head = el('span', null, 'conn-head'); head.append(el('b', 'Google'), pill(kind, word));
-    const on = new Set(home.accounts.flatMap(a => a.services.filter(s => s.on).map(s => s.label)));
-    main.append(head, el('small', home.accounts.length
-      ? (on.size ? `Your agent can use ${[...on].join(', ')} on ${home.accounts.length === 1 ? 'your account' : `${home.accounts.length} accounts`}.` : 'Switch on what your agent may use.')
+    const all = allAccounts();
+    const on = new Set(all.flatMap(a => a.services.filter(s => s.on).map(s => s.label)));
+    main.append(head, el('small', all.length
+      ? (on.size ? `Your agent can use ${[...on].join(', ')} on ${all.length === 1 ? 'your account' : `${all.length} accounts`}.` : 'Switch on what your agent may use.')
       : 'Sign in once. Then choose what your agent may use: Gmail, Calendar, Drive, Contacts, YouTube.'));
     card.append(tile, main);
     view.append(section(null, card));
@@ -113,20 +116,18 @@
     if (home.requests.length) view.append(section('Waiting for you', ...home.requests.map(requestCard)));
 
     // 2. Accounts, each with its service switches
-    if (home.accounts.length) {
+    if (all.length) {
       const grid = el('div', null, 'wz-grid accounts');
       for (const a of home.accounts) grid.append(accountCard(a));
+      for (const a of home.quick.accounts) grid.append(quickCard(a));
       view.append(section('Accounts', grid));
     }
 
-    // 3. One primary action
+    // 3. One primary action: choose how to connect (Quick connect or your own Google client)
     const acts = el('div', null, 'primary');
-    if (ready()) acts.append(button(home.accounts.length ? 'Add another Google account' : 'Connect Google', () => connectSheet()));
-    else {
-      const setup = home.setup, step = setup.steps.find(s => s.id === setup.current);
-      if (step && setup.steps.some(s => s.done)) acts.append(el('p', `Setup step ${step.n} of ${setup.count}: ${step.title}`, 'muted'));
-      acts.append(button(setup.steps.some(s => s.done) ? 'Continue setup' : 'Set up Google', () => go({ kind: 'setup' })));
-    }
+    const setup = home.setup, step = setup.steps.find(s => s.id === setup.current);
+    if (!ready() && step && setup.steps.some(s => s.done)) acts.append(el('p', `Your own client: step ${step.n} of ${setup.count}, ${step.title}`, 'muted'));
+    acts.append(button(all.length ? 'Add another Google account' : 'Connect Google', () => waySheet()));
     view.append(acts);
 
     // 4. Details, collapsed
@@ -134,6 +135,8 @@
     more.append(el('summary', 'More'));
     const list = el('div', null, 'wz-list');
     const mode = home.sign_in.mode || (home.sign_in.wizard_available ? 'wizard' : 'own');
+    list.append(row('Quick connect', home.quick.keys.length ? `Through Composio · ${home.quick.keys.length === 1 ? '1 key' : `${home.quick.keys.length} keys`}` : 'Through Composio · not set up',
+      () => go({ kind: 'quick' }), '✦'));
     list.append(row('Sign-in', mode === 'wizard' ? 'Wizard\'s Google app' : (home.client ? `Your own Google client · ${home.client.project_id || home.client.project_number}` : 'Your own Google client (not set up)'),
       mode === 'own' || !home.accounts.length ? () => signInSheet() : null, '⚙'));
     for (const c of home.clients.filter(c => c.kind === 'app')) list.append(row(c.label, callerLine(c), () => go({ kind: 'caller', id: c.id }), '▣'));
@@ -258,6 +261,159 @@
     if (home.client && home.client.mode === 'own') form.append(el('p', `Saved: ${home.client.client_id.split('-')[0]}-…  ·  secret ${home.client.secret_hint}`, 'muted'));
     form.append(area, file, acts, result);
     return form;
+  }
+
+  // ---------- choose a way to connect ----------
+  function waySheet() {
+    const list = el('div', null, 'wz-list');
+    list.append(row('Quick connect', 'About a minute. Gmail and Calendar, through Composio.', () => { sheetClose(); go({ kind: 'quick' }); }, '✦',
+      home.quick.ready ? pill('ok', 'Ready') : null));
+    const own = ready() ? (home.client ? 'Ready. Gmail, Calendar, Drive, Contacts, YouTube.' : 'Quickest when available.')
+      : 'About ten minutes in Google Cloud. Nobody else is involved.';
+    list.append(row('Your own Google client', own, () => { sheetClose(); if (ready()) connectSheet(); else go({ kind: 'setup' }); }, '⚙',
+      ready() && home.client ? pill('ok', 'Ready') : null));
+    openSheet(allAccounts().length ? 'Add a Google account' : 'Connect Google', list,
+      el('p', 'You can use both, and switch any time.', 'muted'));
+  }
+
+  // ---------- Quick connect (Composio) ----------
+  function renderQuick() {
+    const q = home.quick;
+    view.append(crumb('Quick connect'));
+    view.append(el('p', q.note, 'quick-note'));
+    const keys = el('section', null, 'wz-sec');
+    keys.append(el('h3', q.keys.length ? 'Your Composio key' + (q.keys.length > 1 ? 's' : '') : '1. Get a Composio key', 'sec-title'));
+    if (!q.keys.length) {
+      keys.append(el('p', `Create a free Composio account, then copy its API key. ${q.key_help}`, 'sec-note'));
+      const acts = el('div', null, 'actions pad'); acts.append(link('Create free account ↗', q.signup_url, 'wz-button secondary')); keys.append(acts);
+      keys.append(keyForm(false));
+    } else {
+      const list = el('div', null, 'wz-list');
+      for (const k of q.keys) list.append(keyRow(k));
+      keys.append(list, padded(button('Add another key', () => openSheet('Add a Composio key', el('p', `Several keys are fine, for example a second free account. ${q.key_help}`, 'muted'), keyForm(true)), 'wz-button secondary')));
+    }
+    view.append(keys);
+    const go2 = el('section', null, 'wz-sec');
+    go2.append(el('h3', q.keys.length ? 'Connect' : '2. Connect', 'sec-title'));
+    go2.append(el('p', 'Sign in to Google on Composio\'s page. Gmail and Calendar each ask once.', 'sec-note'));
+    const acts = padded(button('Quick connect', () => quickSheet(null), 'wz-button', q.ready ? {} : { disabled: '' }));
+    go2.append(acts);
+    if (q.accounts.length) go2.append(el('p', `Connected: ${q.accounts.map(a => a.email || 'Google account').join(', ')}.`, 'sec-note'));
+    view.append(go2);
+  }
+  function keyRow(k) {
+    const r = el('div', null, 'key-row');
+    r.append(el('span', initial(k.label), 'wz-tile', { 'aria-hidden': 'true' }));
+    const main = el('span', null, 'wz-main');
+    main.append(el('b', `${k.label} · ${k.hint}`));
+    const used = `${k.calls_this_month.toLocaleString()} calls this month (about ${k.free_calls.toLocaleString()} free)`;
+    main.append(el('small', k.status === 'ok' ? used : (k.error || 'Not checked yet') + ' · ' + used));
+    r.append(main, pill(k.status === 'ok' ? 'ok' : (k.status === 'unchecked' ? 'off' : 'warn'), k.status === 'ok' ? 'Working' : (k.status === 'unchecked' ? 'Not checked' : 'Not working')));
+    const rm = button('Remove', async () => {
+      if (rm.dataset.armed !== '1') { rm.dataset.armed = '1'; rm.textContent = 'Remove?'; return; }
+      try { await api(`api/quick/keys/${k.id}/remove`, {}); await refresh(); say('Key removed.', true); } catch (e) { say(e.message); rm.dataset.armed = ''; rm.textContent = 'Remove'; }
+    }, 'wz-button secondary small rm');
+    r.append(rm);
+    return r;
+  }
+  function keyForm(inSheet) {
+    const form = el('form', null, 'key-form', { autocomplete: 'off' });
+    const id = inSheet ? 'quick-key-2' : 'quick-key';
+    const input = el('input', null, 'wz-field', { id, type: 'password', autocomplete: 'off', spellcheck: 'false', autocapitalize: 'off', 'aria-describedby': id + '-msg' });
+    const label = el('label', 'Composio API key', null, { for: id });
+    const msg = el('p', 'Saved on this box only. Wizard checks it with Composio first.', 'hint', { id: id + '-msg' });
+    const save = el('button', 'Save key', 'wz-button', { type: 'submit' });
+    form.onsubmit = async e => {
+      e.preventDefault(); save.disabled = true; input.removeAttribute('aria-invalid'); msg.classList.remove('bad'); msg.textContent = 'Checking with Composio…';
+      try {
+        await api('api/quick/keys', { key: input.value.trim() });
+        input.value = ''; if (inSheet) sheetClose(); await refresh(); say('Composio accepted the key.', true);
+      } catch (err) {
+        input.setAttribute('aria-invalid', 'true'); msg.classList.add('bad'); msg.textContent = err.message;
+      } finally { save.disabled = false; }
+    };
+    const acts = el('div', null, 'actions'); acts.append(save);
+    form.append(label, input, msg, acts);
+    return form;
+  }
+  function quickSheet(account) {
+    const chosen = new Set(account ? [] : ['gmail', 'calendar']);
+    const list = el('div', null, 'wz-list');
+    for (const s of home.quick.services) {
+      const t = toggle(chosen.has(s.id), s.label, s.what, () => { chosen.has(s.id) ? chosen.delete(s.id) : chosen.add(s.id); t.setAttribute('aria-pressed', String(chosen.has(s.id))); });
+      list.append(t);
+    }
+    openSheet('Quick connect', el('p', 'What may your agent use on this account? Each one signs in once on Composio\'s page.', 'muted'), list,
+      actionsOf(button('Continue to Composio', () => { queue = home.quick.services.map(s => s.id).filter(id => chosen.has(id)); if (queue.length) startQuick(queue.shift(), account); })));
+  }
+  async function startQuick(service, account) {
+    const tab = window.open('', '_blank');
+    const label = (home.quick.services.find(s => s.id === service) || { label: service }).label;
+    try {
+      const out = await api('api/quick/start', { service, account: account ? account.id : null });
+      if (tab) { tab.opener = null; tab.location.href = out.redirect_url; }
+      openSheet(`Finish ${label} in the new tab`, el('p', 'Choose your Google account and allow access. When it says you can close the tab, come back here. This page updates by itself.', 'muted'),
+        el('div', null, 'spinner', { 'aria-hidden': 'true' }),
+        actionsOf(link(tab ? 'Open the page again ↗' : 'Open the page ↗', out.redirect_url, tab ? 'wz-button secondary' : 'wz-button'),
+          button('Cancel', () => { queue = []; sheetClose(); }, 'wz-button secondary')));
+      pollQuick(label);
+    } catch (e) { if (tab) tab.close(); queue = []; sheetClose(); say(e.message); }
+  }
+  function pollQuick(label) {
+    stopPolling();
+    const mine = ++seq;
+    polling = setInterval(async () => {
+      try {
+        const s = await api('api/quick/status');
+        if (mine !== seq) return;
+        if (s.status === 'connected') {
+          stopPolling(); await refresh();
+          const account = home.quick.accounts.find(a => a.id === s.result.account);
+          if (queue.length && account) {
+            const next = queue.shift(), nextLabel = (home.quick.services.find(x => x.id === next) || { label: next }).label;
+            openSheet(`${label} is connected`, el('p', `Next: ${nextLabel} for ${account.email || 'this account'}. It signs in once more.`, 'muted'),
+              actionsOf(button(`Connect ${nextLabel}`, () => startQuick(next, account)), button('Not now', () => { queue = []; sheetClose(); }, 'wz-button secondary')));
+          } else { sheetClose(); say(`Connected ${s.result.email || 'your account'}.`, true); }
+        } else if (s.status === 'failed') { stopPolling(); queue = []; sheetClose(); say(s.result.message); }
+      } catch { /* keep waiting */ }
+    }, 1500);
+  }
+  function quickCard(a) {
+    const box = el('div', null, 'wz-list account');
+    const tile = el('span', initial(a.label || a.email), 'wz-tile', { 'aria-hidden': 'true' });
+    box.append(row(a.label || a.email || 'Google account', `${a.label ? a.email + ' · ' : ''}Quick connect`, () => quickAccountSheet(a), tile,
+      a.status === 'active' ? pill('ok', 'Connected') : pill('warn', 'Sign in again')));
+    if (a.status !== 'active') {
+      box.append(row('This sign-in ended', 'Quick connect again to keep things working.', () => { queue = a.services.filter(s => s.linked).map(s => s.id); startQuick(queue.shift(), a); }, '!'));
+      return box;
+    }
+    for (const s of a.services) {
+      box.append(toggle(s.on, s.label, s.on ? s.what : (s.linked ? 'Off' : 'Off · signs in once'), async e => {
+        const t = e.currentTarget; if (busy) return; busy = true; t.disabled = true;
+        try { await api(`api/quick/accounts/${a.id}/service`, { service: s.id, on: !s.on }); await refresh(); say(`${s.label} ${s.on ? 'off' : 'on'} for ${a.label || a.email}.`, true); }
+        catch (err) {
+          if (err.code === 'consent_needed') { busy = false; queue = []; return startQuick(s.id, a); }
+          say(err.message); t.disabled = false;
+        } finally { busy = false; }
+      }));
+    }
+    return box;
+  }
+  function quickAccountSheet(a) {
+    const input = el('input', null, 'wz-field', { value: a.label || '', placeholder: 'Work, Personal…', 'aria-label': 'Name', maxlength: '40', enterkeyhint: 'done' });
+    const form = el('form', null, 'label-form'); form.append(input);
+    const save = async () => { try { await api(`api/quick/accounts/${a.id}/label`, { label: input.value }); sheetClose(); await refresh(); say('Saved.', true); } catch (e) { say(e.message); } };
+    form.onsubmit = e => { e.preventDefault(); save(); };
+    const chips = el('div', null, 'chips');
+    for (const name of ['Work', 'Personal']) chips.append(button(name, () => { input.value = name; save(); }, 'wz-chip'));
+    openSheet(a.email || 'Google account', el('p', 'Connected through Composio (Quick connect). Name it so you and your agent can tell accounts apart.', 'muted'), form, chips,
+      actionsOf(button('Save name', save, 'wz-button secondary'),
+        button('Disconnect', () => openSheet(`Disconnect ${a.email}?`, el('p', 'Wizard forgets this account and asks Composio to remove the sign-in.', 'muted'),
+          actionsOf(button('Disconnect', async () => {
+            try { const out = await api(`api/quick/accounts/${a.id}/disconnect`, {}); sheetClose(); await refresh();
+              say(out.removed_at_composio ? 'Disconnected.' : 'Disconnected here. Remove access at myaccount.google.com/connections too.', true); }
+            catch (e) { say(e.message); }
+          }, 'wz-button danger'), button('Cancel', sheetClose, 'wz-button secondary'))), 'wz-button secondary danger')));
   }
 
   // ---------- one app (typed operations for other Wizard apps) ----------

@@ -17,11 +17,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from broker import Broker, Problem  # noqa: E402
 from google import OPERATIONS, SERVICES  # noqa: E402
+import mailcal  # noqa: E402
+from quick import QuickProblem, valid_attempt  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / 'web'
 APP_ID = 'wizard-google'
-VERSION = '0.2.0'
+VERSION = '0.3.0'
 ASSETS = {'index.html', 'app.js', 'styles.css', 'boot.js', 'tokens.css', 'ui.css', 'appearance-client.js', 'sheet.js', 'icon.png', 'standalone.css'}
 DEFAULT_SIGNIN_SERVICE = 'https://www.aiwizards.com/wizard-google/auth'
 FORWARDING = ('X-Forwarded-For', 'X-Forwarded-Host', 'Forwarded', 'X-Real-IP')
@@ -140,7 +142,7 @@ def tools():
         {'name': 'google_help', 'description': 'gog\'s own machine-readable help for a command, e.g. "gmail search" or "calendar create": its flags, arguments '
                                                'and output. Empty lists the command groups you may use.',
          'annotations': {'readOnlyHint': True}, 'inputSchema': {'type': 'object', 'properties': {'command': {'type': 'string'}}}},
-    ]
+    ] + mailcal.mcp_tools()
 
 
 def rpc(app, message, caller):
@@ -168,6 +170,8 @@ def rpc(app, message, caller):
             value = broker.run_gog(caller, args.get('args'), args.get('account'))
         elif name == 'google_help':
             value = broker.gog_help(args.get('command') or '')
+        elif name in mailcal.TOOLS:
+            value = broker.mailcal_call(caller, name, args)
         else:
             return {'jsonrpc': '2.0', 'id': rid, 'error': {'code': -32602, 'message': 'Unknown tool'}}
         return {'jsonrpc': '2.0', 'id': rid, 'result': {'content': [{'type': 'text', 'text': json.dumps(value)}], 'structuredContent': value, 'isError': False}}
@@ -179,10 +183,10 @@ def rpc(app, message, caller):
 # ---------- HTTP ----------
 
 class App:
-    def __init__(self, config, broker=None, transport=None):
+    def __init__(self, config, broker=None, transport=None, composio_transport=None):
         self.config = config
         self.broker = broker or Broker(config.data_dir, transport=transport, store_key=config.store_key, relay_callback=config.relay_callback,
-                                       signin_service=config.signin_service)
+                                       signin_service=config.signin_service, composio_transport=composio_transport)
         self.sessions = Sessions()
         self.grants = WizardGrants(config.grants_file)
         self.origins = []
@@ -355,6 +359,28 @@ def handler_for(app):
                         return self.send_page(400, 'Not connected', problem.message, back)
                     note = ' Google did not allow everything you ticked; you can switch it on later.' if result.get('declined') or result.get('declined_services') else ''
                     return self.send_page(200, 'Connected', f"{result['email'] or 'Your account'} is connected. Close this tab and return to Wizard.{note}", back)
+                if path == '/quick/callback':
+                    self.owner()
+                    attempt = query.get('attempt')
+                    if not valid_attempt(attempt):
+                        return self.send_page(400, 'Not connected', 'This link is not valid. Start again from Wizard.', '../')
+                    try:
+                        session = self.session()
+                    except Problem:
+                        session = None
+                    found = app.broker.quick.links.get(attempt)
+                    if not found or found.get('session') != session:
+                        return self.send_page(200, 'Almost done', 'Return to Wizard: the Google app finishes the connection there.', '../')
+                    result = app.broker.quick.status(session, attempt)
+                    if result['status'] == 'connected':
+                        return self.send_page(200, 'Connected', f"{result['result']['email'] or 'Your account'} is connected. Close this tab and return to Wizard.", '../')
+                    if result['status'] == 'failed':
+                        return self.send_page(400, 'Not connected', result['result']['message'], '../')
+                    return self.send_page(200, 'Almost done', 'Return to Wizard: the Google app finishes the connection there.', '../')
+                if path == '/v1/status':
+                    self.mcp_caller()
+                    self.host()
+                    return self.send_json(200, app.broker.agent_status())
                 if path.startswith('/consumer/v1/'):
                     caller = self.consumer_caller()
                     if path == '/consumer/v1/status':
@@ -369,6 +395,8 @@ def handler_for(app):
                         return self.send_json(200, app.broker.home(origin, app.shell_path_for(host), session))
                     if path == '/api/oauth/status':
                         return self.send_json(200, app.broker.flow_status(session))
+                    if path == '/api/quick/status':
+                        return self.send_json(200, app.broker.quick.status(session))
                     raise Problem(404, 'not_found', 'Not found.')
                 self.host()
                 asset = 'index.html' if path in ('', '/') else path.lstrip('/')
@@ -394,6 +422,14 @@ def handler_for(app):
                     self.host()
                     output = rpc(app, self.body(), caller)
                     return self.send_json(202 if output is None else 200, output or {})
+                local = re.fullmatch(r'/v1/([a-z_]{3,40})', path)
+                if local:
+                    # Box-only HTTP mirror of the MCP mail/calendar tools, for scripts and Wizard apps on this box.
+                    caller = self.mcp_caller()
+                    self.host()
+                    if local.group(1) not in mailcal.TOOLS:
+                        raise Problem(404, 'not_found', 'Not found.')
+                    return self.send_json(200, app.broker.mailcal_call(caller, local.group(1), self.body()))
                 if path.startswith('/consumer/v1/'):
                     caller = self.consumer_caller()
                     body = self.body()
@@ -424,9 +460,25 @@ def handler_for(app):
                     '/api/oauth/cancel': lambda: broker.cancel(session),
                     '/api/grants': lambda: broker.set_grant(body.get('client'), body.get('account'), body.get('operations')),
                     '/api/keys': lambda: broker.create_key(body.get('client')),
+                    '/api/quick/keys': lambda: broker.quick.add_key(body.get('key'), body.get('label')),
+                    '/api/quick/start': lambda: broker.quick.start(session, body.get('service'), body.get('account'),
+                                                                   origin.rstrip('/') + shell + 'quick/callback'),
                 }
-                if path in routes:
-                    return self.send_json(200, routes[path]())
+                quick = re.fullmatch(r'/api/quick/(keys|accounts)/([A-Za-z0-9_-]{4,64})/(remove|service|label|disconnect)', path)
+                try:
+                    if path in routes:
+                        return self.send_json(200, routes[path]())
+                    if quick:
+                        kind, item, action = quick.groups()
+                        q = broker.quick
+                        actions = {('keys', 'remove'): lambda: q.remove_key(item),
+                                   ('accounts', 'service'): lambda: q.set_service(item, body.get('service'), body.get('on')),
+                                   ('accounts', 'label'): lambda: q.set_label(item, body.get('label')),
+                                   ('accounts', 'disconnect'): lambda: q.disconnect(item)}
+                        if (kind, action) in actions:
+                            return self.send_json(200, actions[(kind, action)]())
+                except QuickProblem as problem:
+                    raise Problem(problem.status, problem.code, problem.message, **problem.extra) from None
                 match = re.fullmatch(r'/api/(accounts|grants|keys|requests)/([A-Za-z0-9_-]{4,64})/(disconnect|check|revoke|approve|decline|service|label)', path)
                 if match:
                     kind, item, action = match.groups()
