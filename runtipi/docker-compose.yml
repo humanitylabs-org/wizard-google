@@ -4,7 +4,7 @@
 services:
   wizard-google:
     # Built and pushed by .github/workflows/image.yml (amd64 + arm64) from commit 4c35283; source: app/Dockerfile.
-    image: ghcr.io/humanitylabs-org/wizard-google:sha-085c6a5ed604727aa0d40a1016d2b69bc8eaf2e3@sha256:93ad9f9abd5f2e47cab47acf2537def19f1292d5a8500ba0fbe310f59720080e
+    image: ghcr.io/humanitylabs-org/wizard-google:sha-f6dd4db05d3ebb626b9191ca5a350b5c7d0b1308@sha256:295f51b8607980478d30bb47a78fbbe157eed591ba5eafe36f848f474a8d7bf7
     # A fresh App Manager data bind is root-owned; retain the sandbox below.
     user: "0:0"
     read_only: true
