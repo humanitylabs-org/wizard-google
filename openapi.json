@@ -3,7 +3,7 @@
  "info": {
   "title": "Wizard Google: app API",
   "version": "0.1.0",
-  "description": "For other Wizard apps on this box. Identify with X-Wizard-Grant (App Manager grant, PR #6) or Authorization: Bearer wgk_… (access key made by the owner in the Google app). Owner browser credentials are refused. Wizard makes every Google call; no response carries a Google token."
+  "description": "For other Wizard apps on this box. Identify with X-Wizard-Grant (App Manager grant, PR #6) or Authorization: Bearer wgk_\u2026 (access key made by the owner in the Google app). Owner browser credentials are refused. Wizard makes every Google call; no response carries a Google token."
  },
  "components": {
   "securitySchemes": {
@@ -218,6 +218,18 @@
           "type": "string",
           "description": "Search words; the provider's search syntax works (e.g. from:anna, subject:invoice)."
          },
+         "folder": {
+          "type": "string",
+          "enum": [
+           "inbox",
+           "sent",
+           "drafts",
+           "archive",
+           "trash",
+           "all"
+          ],
+          "description": "inbox, sent, drafts, archive, trash or all (default all)."
+         },
          "unread_only": {
           "type": "boolean",
           "description": "Only unread messages."
@@ -265,6 +277,14 @@
          "id": {
           "type": "string",
           "description": "Message id from mail_search."
+         },
+         "format": {
+          "type": "string",
+          "enum": [
+           "text",
+           "html"
+          ],
+          "description": "html adds body_html (unsanitized; mail apps clean it)."
          }
         }
        }
@@ -638,6 +658,50 @@
          },
          "comment": {
           "type": "string"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Result in contract wizard.mail-calendar/1 (docs/mail-calendar-contract.md)"
+     },
+     "4XX": {
+      "description": "{error:{code,message}}"
+     }
+    }
+   }
+  },
+  "/v1/mail_update": {
+   "post": {
+    "summary": "Box-only mirror of the MCP tool. Mark a message read or unread, archive it, or move it to the trash (or back). Nothing is deleted for good. Ask the owner before archiving or trashing.",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "id"
+        ],
+        "properties": {
+         "account": {
+          "type": "string",
+          "description": "Email or label (e.g. \"work\") of the account. Optional when only one account has this on."
+         },
+         "id": {
+          "type": "string"
+         },
+         "read": {
+          "type": "boolean"
+         },
+         "archived": {
+          "type": "boolean"
+         },
+         "trashed": {
+          "type": "boolean"
          }
         }
        }

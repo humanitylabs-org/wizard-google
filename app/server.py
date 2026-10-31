@@ -18,13 +18,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from broker import Broker, Problem  # noqa: E402
 from google import OPERATIONS, SERVICES  # noqa: E402
 import mailcal  # noqa: E402
-from quick import QuickProblem, valid_attempt  # noqa: E402
+from quick import QuickProblem, valid_attempt, valid_flow  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / 'web'
 APP_ID = 'wizard-google'
-VERSION = '0.3.0'
-ASSETS = {'index.html', 'app.js', 'styles.css', 'boot.js', 'tokens.css', 'ui.css', 'appearance-client.js', 'sheet.js', 'icon.png', 'standalone.css'}
+VERSION = '0.3.1'
+ASSETS = {'index.html', 'app.js', 'styles.css', 'boot.js', 'tokens.css', 'ui.css', 'appearance-client.js', 'sheet.js', 'icon.png', 'standalone.css', 'close.js'}
 DEFAULT_SIGNIN_SERVICE = 'https://www.aiwizards.com/wizard-google/auth'
 FORWARDING = ('X-Forwarded-For', 'X-Forwarded-Host', 'Forwarded', 'X-Real-IP')
 SESSION_TTL = 8 * 3600
@@ -247,6 +247,26 @@ def handler_for(app):
             self.end_headers()
             self.wfile.write(raw)
 
+        def send_redirect(self, url):
+            self.send_response(302)
+            self.headers_common('text/plain; charset=utf-8')
+            self.send_header('Location', url)
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+
+        def send_done(self, title, message, close):
+            # The popup's last page. close.js closes it when the app opened it; the opener also closes it.
+            esc = lambda s: s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
+            script = '<script src="../../close.js"></script>' if close else ''
+            raw = (f'<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+                   f'<title>{esc(title)}</title><link rel="stylesheet" href="../../tokens.css"><link rel="stylesheet" href="../../ui.css">'
+                   f'<body><main class="wz-empty"><strong>{esc(title)}</strong><p>{esc(message)}</p></main>{script}</body></html>').encode()
+            self.send_response(200)
+            self.headers_common('text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
         def fail(self, problem):
             self.send_json(problem.status, {'error': problem.as_dict()})
 
@@ -283,6 +303,9 @@ def handler_for(app):
             if origin not in config.trusted_origins or origin != app.origin_for(host) or (self.headers.get('Sec-Fetch-Site') or 'same-origin').lower() != 'same-origin':
                 raise Problem(403, 'origin_rejected', 'Open this app from your Wizard.')
             return origin
+
+        def flow_base(self, host):
+            return (app.origin_for(host) or '').rstrip('/') + app.shell_path_for(host) + 'quick/go'
 
         def session(self, csrf=False):
             return app.sessions.check(read_cookie(self.headers.get('Cookie'), 'wg_session'), self.headers.get('X-CSRF-Token', '') if csrf else None)
@@ -377,6 +400,21 @@ def handler_for(app):
                     if result['status'] == 'failed':
                         return self.send_page(400, 'Not connected', result['result']['message'], '../')
                     return self.send_page(200, 'Almost done', 'Return to Wizard: the Google app finishes the connection there.', '../')
+                go = re.fullmatch(r'/quick/go/(qf-[A-Za-z0-9_-]{8,40})', path)
+                if go:
+                    # The Quick connect popup loops through here: Composio sign-in, then each Google sign-in, then done.
+                    host = self.owner()
+                    try:
+                        session = self.session()
+                        view, target = app.broker.quick.flow_step(session, go.group(1), self.flow_base(host))
+                    except (Problem, QuickProblem) as problem:
+                        return self.send_done('Not connected', problem.message, False)
+                    if target:
+                        return self.send_redirect(target)
+                    if view['state'] == 'done':
+                        who = (view.get('result') or {}).get('email') or 'Your account'
+                        return self.send_done('Connected', f'{who} is connected. This window closes by itself.', True)
+                    return self.send_done('Not connected', (view.get('error') or {}).get('message') or 'Start again from Wizard.', True)
                 if path == '/v1/status':
                     self.mcp_caller()
                     self.host()
@@ -397,6 +435,14 @@ def handler_for(app):
                         return self.send_json(200, app.broker.flow_status(session))
                     if path == '/api/quick/status':
                         return self.send_json(200, app.broker.quick.status(session))
+                    if path == '/api/quick/flow':
+                        if not valid_flow(query.get('flow')):
+                            raise Problem(400, 'invalid_flow', 'Unknown sign-in.')
+                        try:
+                            view, _ = app.broker.quick.flow_step(session, query['flow'], self.flow_base(host))
+                        except QuickProblem as problem:
+                            raise Problem(problem.status, problem.code, problem.message) from None
+                        return self.send_json(200, {**view, 'go': app.shell_path_for(host) + 'quick/go/' + query['flow']})
                     raise Problem(404, 'not_found', 'Not found.')
                 self.host()
                 asset = 'index.html' if path in ('', '/') else path.lstrip('/')
@@ -463,6 +509,9 @@ def handler_for(app):
                     '/api/quick/keys': lambda: broker.quick.add_key(body.get('key'), body.get('label')),
                     '/api/quick/start': lambda: broker.quick.start(session, body.get('service'), body.get('account'),
                                                                    origin.rstrip('/') + shell + 'quick/callback'),
+                    '/api/quick/flow': lambda: (lambda f: {**f, 'go': shell + 'quick/go/' + f['flow']})(
+                        broker.quick.flow_begin(session, body.get('services'), body.get('account'))),
+                    '/api/quick/flow/cancel': lambda: broker.quick.flow_cancel(session, body.get('flow')),
                 }
                 quick = re.fullmatch(r'/api/quick/(keys|accounts)/([A-Za-z0-9_-]{4,64})/(remove|service|label|disconnect)', path)
                 try:

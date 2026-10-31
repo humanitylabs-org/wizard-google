@@ -64,7 +64,7 @@
   function go(next) { stack.push(next); sheetClose(); say(''); render(); view.scrollTop = 0; }
   function back() { if (!stack.length) return false; stack.pop(); render(); return true; }
   if (window.WizardApp?.version === 1) {
-    WizardApp.ready({ name: 'wizard-google', version: '0.3.0' });
+    WizardApp.ready({ name: 'wizard-google', version: '0.3.1' });
     WizardApp.back.register({ canGoBack: () => stack.length > 0, back });
   }
 
@@ -282,11 +282,10 @@
     view.append(crumb('Quick connect'));
     view.append(el('p', q.note, 'quick-note'));
     const keys = el('section', null, 'wz-sec');
-    keys.append(el('h3', q.keys.length ? 'Your Composio key' + (q.keys.length > 1 ? 's' : '') : '1. Get a Composio key', 'sec-title'));
+    keys.append(el('h3', q.keys.length ? 'Your Composio key' + (q.keys.length > 1 ? 's' : '') : 'Composio account', 'sec-title'));
     if (!q.keys.length) {
-      keys.append(el('p', `Create a free Composio account, then copy its API key. ${q.key_help}`, 'sec-note'));
-      const acts = el('div', null, 'actions pad'); acts.append(link('Create free account ↗', q.signup_url, 'wz-button secondary')); keys.append(acts);
-      keys.append(keyForm(false));
+      keys.append(el('p', 'Quick connect asks you to sign in to Composio (or create a free account) in the same window. The key is saved by itself.', 'sec-note'));
+      keys.append(padded(button('Paste a key instead', () => openSheet('Paste a Composio key', el('p', q.key_help, 'muted'), keyForm(true)), 'wz-button secondary')));
     } else {
       const list = el('div', null, 'wz-list');
       for (const k of q.keys) list.append(keyRow(k));
@@ -294,9 +293,9 @@
     }
     view.append(keys);
     const go2 = el('section', null, 'wz-sec');
-    go2.append(el('h3', q.keys.length ? 'Connect' : '2. Connect', 'sec-title'));
-    go2.append(el('p', 'Sign in to Google on Composio\'s page. Gmail and Calendar each ask once.', 'sec-note'));
-    const acts = padded(button('Quick connect', () => quickSheet(null), 'wz-button', q.ready ? {} : { disabled: '' }));
+    go2.append(el('h3', 'Connect', 'sec-title'));
+    go2.append(el('p', 'One window: sign in to Google (and Composio the first time). Gmail and Calendar each ask once.', 'sec-note'));
+    const acts = padded(button('Quick connect', () => quickSheet(null), 'wz-button'));
     go2.append(acts);
     if (q.accounts.length) go2.append(el('p', `Connected: ${q.accounts.map(a => a.email || 'Google account').join(', ')}.`, 'sec-note'));
     view.append(go2);
@@ -344,37 +343,50 @@
       list.append(t);
     }
     openSheet('Quick connect', el('p', 'What may your agent use on this account? Each one signs in once on Composio\'s page.', 'muted'), list,
-      actionsOf(button('Continue to Composio', () => { queue = home.quick.services.map(s => s.id).filter(id => chosen.has(id)); if (queue.length) startQuick(queue.shift(), account); })));
+      actionsOf(button('Continue', () => { const picked = home.quick.services.map(s => s.id).filter(id => chosen.has(id)); queue = []; if (picked.length) runFlow(picked, account); })));
   }
-  async function startQuick(service, account) {
+  // One popup does it all: Composio sign-in when no key works yet, then each Google sign-in (contract doc, "Connecting from another app").
+  function startQuick(service, account) { return runFlow([service, ...queue.splice(0)], account); }
+  async function runFlow(services, account) {
     const tab = window.open('', '_blank');
-    const label = (home.quick.services.find(s => s.id === service) || { label: service }).label;
+    stopPolling();
     try {
-      const out = await api('api/quick/start', { service, account: account ? account.id : null });
-      if (tab) { tab.opener = null; tab.location.href = out.redirect_url; }
-      openSheet(`Finish ${label} in the new tab`, el('p', 'Choose your Google account and allow access. When it says you can close the tab, come back here. This page updates by itself.', 'muted'),
-        el('div', null, 'spinner', { 'aria-hidden': 'true' }),
-        actionsOf(link(tab ? 'Open the page again ↗' : 'Open the page ↗', out.redirect_url, tab ? 'wz-button secondary' : 'wz-button'),
-          button('Cancel', () => { queue = []; sheetClose(); }, 'wz-button secondary')));
-      pollQuick(label);
-    } catch (e) { if (tab) tab.close(); queue = []; sheetClose(); say(e.message); }
+      const out = await api('api/quick/flow', { services, account: account ? account.id : null });
+      const go = new URL(out.go, location.href).href;
+      if (tab) { tab.opener = null; tab.location.href = go; }
+      flowSheet(out.flow, go, tab, null);
+      pollFlow(out.flow, go, tab);
+    } catch (e) { if (tab) tab.close(); sheetClose(); say(e.message); }
   }
-  function pollQuick(label) {
+  function flowSheet(flow, go, tab, view) {
+    const label = view && view.label ? view.label : 'Google';
+    const text = view && view.where === 'composio'
+      ? 'Sign in or create a free Composio account in the new window. Your key is saved by itself.'
+      : `Choose your Google account and allow access for ${label}. This page updates by itself.`;
+    const steps = el('div', null, 'wz-list');
+    for (const s of (view ? view.steps : [])) steps.append(row(s.label, s.done ? 'Done' : (s.id === view.step ? 'Now' : 'Next'), null, s.done ? '✓' : '·'));
+    const again = button(tab && !tab.closed ? 'Show the window' : 'Continue', () => { const t = window.open(go, '_blank'); if (t) { t.opener = null; pollFlow(flow, go, t); } }, 'wz-button secondary');
+    openSheet('Finish in the new window', el('p', text, 'muted'), steps, el('div', null, 'spinner', { 'aria-hidden': 'true' }),
+      actionsOf(again, button('Cancel', () => { stopPolling(); api('api/quick/flow/cancel', { flow }).catch(() => {}); if (tab && !tab.closed) tab.close(); sheetClose(); }, 'wz-button secondary')));
+  }
+  function pollFlow(flow, go, tab) {
     stopPolling();
     const mine = ++seq;
+    let where = null, shown = '';
     polling = setInterval(async () => {
       try {
-        const s = await api('api/quick/status');
+        const v = await api('api/quick/flow?flow=' + encodeURIComponent(flow));
         if (mine !== seq) return;
-        if (s.status === 'connected') {
-          stopPolling(); await refresh();
-          const account = home.quick.accounts.find(a => a.id === s.result.account);
-          if (queue.length && account) {
-            const next = queue.shift(), nextLabel = (home.quick.services.find(x => x.id === next) || { label: next }).label;
-            openSheet(`${label} is connected`, el('p', `Next: ${nextLabel} for ${account.email || 'this account'}. It signs in once more.`, 'muted'),
-              actionsOf(button(`Connect ${nextLabel}`, () => startQuick(next, account)), button('Not now', () => { queue = []; sheetClose(); }, 'wz-button secondary')));
-          } else { sheetClose(); say(`Connected ${s.result.email || 'your account'}.`, true); }
-        } else if (s.status === 'failed') { stopPolling(); queue = []; sheetClose(); say(s.result.message); }
+        if (v.state === 'done') {
+          stopPolling(); if (tab && !tab.closed) tab.close(); sheetClose(); await refresh();
+          say(`Connected ${(v.result && v.result.email) || 'your account'}.`, true); return;
+        }
+        if (v.state !== 'running') { stopPolling(); if (tab && !tab.closed) tab.close(); sheetClose(); if (v.error) say(v.error.message); await refresh(); return; }
+        // Composio's own page does not come back by itself: bring the window back once the key has landed.
+        if (where === 'composio' && v.where !== 'composio' && tab && !tab.closed) { try { tab.location.href = go; } catch (_) { /* window gone */ } }
+        where = v.where;
+        const sig = v.step + v.where + (tab && tab.closed);
+        if (sig !== shown) { shown = sig; flowSheet(flow, go, tab, v); }
       } catch { /* keep waiting */ }
     }, 1500);
   }
@@ -555,6 +567,9 @@
   addEventListener('focus', () => { if (csrf && !sheet.open) refresh().catch(() => {}); });
   document.addEventListener('visibilitychange', () => { if (csrf && document.visibilityState === 'visible' && !sheet.open) refresh().catch(() => {}); });
   fetch('api/session', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-Wizard-Request': 'bootstrap' }, body: '{}' })
-    .then(async r => { const v = await r.json(); if (!r.ok) throw new Error(v.error?.message || 'Unavailable.'); csrf = v.csrf; await refresh(); })
+    .then(async r => { const v = await r.json(); if (!r.ok) throw new Error(v.error?.message || 'Unavailable.'); csrf = v.csrf; await refresh();
+      // Deep links from Mail and Calendar: ?start=own opens your-own-client setup, ?start=quick the Quick connect page.
+      const start = new URLSearchParams(location.search).get('start');
+      if (start === 'own') { if (ready() && home.client) connectSheet(); else go({ kind: 'setup' }); } else if (start === 'quick') go({ kind: 'quick' }); })
     .catch(e => { view.replaceChildren(el('div', null, 'wz-empty')); view.firstChild.append(el('strong', 'Google is not available'), el('p', e.message)); });
 })();

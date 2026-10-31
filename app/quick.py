@@ -42,6 +42,29 @@ class Quick:
         self.transport = transport  # Composio HTTP (tests pass a fake)
         self.links = composio.Links(clock)
         self.lock = threading.RLock()
+        self.guide = composio.Guide(_GuideAdapter(self), transport, clock)
+
+    # ---------- guided popup (Sign in to Composio if needed, then Gmail, then Calendar) ----------
+    def flow_begin(self, session, services=None, account=None):
+        services = [s for s in (services or list(TOOLKITS)) if isinstance(s, str)]
+        if not services or any(s not in TOOLKITS for s in services) or len(set(services)) != len(services):
+            raise QuickProblem(400, 'unknown_service', 'Quick connect covers Gmail and Calendar.')
+        if account:
+            self.account(account)
+        try:
+            return {'flow': self.guide.begin(session, services, account)}
+        except composio.ComposioError as error:
+            raise _problem(error) from None
+
+    def flow_step(self, session, flow_id, callback_base):
+        flow = self.guide.get(flow_id, session)
+        if not flow:
+            raise QuickProblem(404, 'flow_not_found', 'This sign-in ended. Start again.')
+        view = self.guide.advance(flow, callback_base)
+        return view, self.guide.target(flow)
+
+    def flow_cancel(self, session, flow_id):
+        return self.guide.cancel(flow_id, session)
 
     # ---------- state ----------
     def section(self):
@@ -273,5 +296,34 @@ class Quick:
                 'services': [{'id': sv, 'label': LABELS[sv], 'what': WHAT[sv]} for sv in TOOLKITS]}
 
 
+class _GuideAdapter:
+    def __init__(self, quick):
+        self.quick = quick
+
+    def ready(self):
+        keys = self.quick.keys()
+        keys.recheck()
+        return any(k['status'] in ('ok', 'unchecked') for k in self.quick.section()['keys'])
+
+    def add_key(self, key):
+        self.quick.keys().add(key, 'Composio')
+
+    def start(self, session, service, account, callback_base):
+        try:
+            return self.quick.start(session, service, account, callback_base)
+        except QuickProblem as problem:
+            raise composio.ComposioError(problem.code.removeprefix('composio_'), problem.message, problem.status) from None
+
+    def status(self, session, attempt):
+        return self.quick.status(session, attempt)
+
+    def label(self, service):
+        return LABELS.get(service, service)
+
+
 def valid_attempt(value):
     return isinstance(value, str) and re.fullmatch(r'cl-[A-Za-z0-9_-]{8,40}', value) is not None
+
+
+def valid_flow(value):
+    return isinstance(value, str) and re.fullmatch(r'qf-[A-Za-z0-9_-]{8,40}', value) is not None

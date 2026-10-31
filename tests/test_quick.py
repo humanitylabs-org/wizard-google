@@ -1,6 +1,7 @@
 """Quick connect (Composio) and the source-neutral mail/calendar tools. Composio and Google are fakes here:
 no test talks to Composio or Google. The fake Composio answers with the shapes in docs.composio.dev (v3.1)."""
 import json
+import re
 import shutil
 import tempfile
 import threading
@@ -15,6 +16,7 @@ import composio
 import server
 
 GOOD, SECOND, BOGUS = 'ak_good_key_1234567890', 'ak_second_key_0987654321', 'ak_bogus_wizard_test_000000'
+USER_KEY, MINTED = 'uak_user_level_key_abcdef', 'ak_minted_by_signin_5555'
 
 
 class FakeComposio:
@@ -32,10 +34,50 @@ class FakeComposio:
                                                                         {'email': 'boss@example.com', 'organizer': True}]}}
         self.email = 'me@example.com'
         self.n = 0
+        self.cli = {}            # CLI sign-in sessions: id -> 'pending' | 'linked'
+        self.info_key = None     # project key carried by session/info (None: the app mints one)
+        self.minted = []
+        self.labels, self.queries = {}, []
 
-    def __call__(self, method, url, key, body=None):
+    def link_signin(self):
+        self.cli[max(self.cli)] = 'linked'
+
+    def signin_route(self, method, parts, key, body, headers):
+        # Composio's CLI login: create-session has no credential; info and create need the user key.
+        assert key is None and 'x-api-key' not in headers
+        path, query = parts.path, dict(urllib.parse.parse_qsl(parts.query))
+        self.calls.append((method, path, headers.get('x-user-api-key')))
+        if method == 'POST' and path == '/api/v3.1/cli/create-session':
+            assert body == {'scope': 'project'} and not headers.get('x-user-api-key')
+            sid = f'{len(self.cli) + 1:08d}-0000-4000-8000-000000000000'
+            self.cli[sid] = 'pending'
+            return 201, {'id': sid, 'code': 'AB12CD', 'expiresAt': '2026-11-03T09:10:00Z', 'status': 'pending', 'scope': 'project'}
+        if method == 'GET' and path == '/api/v3.1/cli/get-session':
+            state = self.cli.get(query.get('id'))
+            if not state:
+                return 404, {'error': {'message': 'CLI session not found or expired', 'code': 2100, 'slug': 'CLI_SessionNotFound', 'status': 404}}
+            return 200, {'id': query['id'], 'code': 'AB12CD', 'status': state, 'expiresAt': '2026-11-03T09:10:00Z', 'scope': 'project',
+                         'account': {'id': 'u1', 'email': 'owner@example.com', 'name': 'Owner'} if state == 'linked' else None,
+                         'api_key': USER_KEY if state == 'linked' else None}
+        if headers.get('x-user-api-key') != USER_KEY:
+            return 401, {'error': {'message': 'Invalid or revoked user API key', 'code': 2113, 'slug': 'UserApiKey_Unauthorized', 'status': 401}}
+        if method == 'GET' and path == '/api/v3.1/auth/session/info':
+            return 200, {'project': {'nano_id': 'proj_1', 'name': 'default', 'org': {'id': 'org_1', 'name': 'Owner'}},
+                         'org_member': {'id': 'm1', 'email': 'owner@example.com'},
+                         'api_key': {'key': self.info_key} if self.info_key else None}
+        if method == 'POST' and path == '/api/v3/org/project/proj_1/api_keys/create':
+            assert headers.get('x-org-id') == 'org_1' and headers.get('x-project-id') == 'proj_1', headers
+            self.keys.add(MINTED)
+            self.minted.append(body['name'])
+            return 200, {'data': {'id': 'k1', 'name': body['name'], 'api_key': MINTED}}
+        return 404, {'error': {'message': 'no route', 'code': 1, 'slug': 'x', 'status': 404}}
+
+    def __call__(self, method, url, key, body=None, headers=None):
         parts = urllib.parse.urlsplit(url)
-        assert parts.hostname == composio.API_HOST and parts.path.startswith('/api/v3.1/'), url
+        assert parts.hostname == composio.API_HOST, url
+        if parts.path.startswith(('/api/v3.1/cli/', '/api/v3.1/auth/', '/api/v3/org/')):
+            return self.signin_route(method, parts, key, body, headers or {})
+        assert parts.path.startswith('/api/v3.1/'), url
         path = parts.path[len('/api/v3.1'):]
         self.calls.append((method, path, key))
         if key not in self.keys:
@@ -84,7 +126,19 @@ class FakeComposio:
         if p == '/calendar/v3/calendars/primary':
             return 200, {'id': self.email}
         if p == '/gmail/v1/users/me/messages':
+            self.queries.append(query)
             return 200, {'messages': [{'id': k} for k in self.mail]}
+        action = re.fullmatch(r'/gmail/v1/users/me/messages/([a-z0-9]+)/(modify|trash|untrash)', p)
+        if action and method == 'POST':
+            mid, verb = action.groups()
+            labels = self.labels.setdefault(mid, ['INBOX', 'UNREAD'])
+            if verb == 'modify':
+                labels[:] = [x for x in labels if x not in body['removeLabelIds']] + [x for x in body['addLabelIds'] if x not in labels]
+            elif verb == 'trash':
+                labels[:] = [x for x in labels if x != 'INBOX'] + ['TRASH']
+            else:
+                labels[:] = [x for x in labels if x != 'TRASH']
+            return 200, {'id': mid, 'labelIds': labels}
         if p.startswith('/gmail/v1/users/me/messages/'):
             mid = p.rsplit('/', 1)[1]
             if mid not in self.mail:
@@ -92,12 +146,14 @@ class FakeComposio:
             m = self.mail[mid]
             import base64
             data = base64.urlsafe_b64encode(m['body'].encode()).decode()
-            return 200, {'id': mid, 'threadId': 't-' + mid, 'snippet': m['body'][:30], 'labelIds': ['INBOX', 'UNREAD'],
+            html = base64.urlsafe_b64encode(('<p onclick="x()">' + m['body'] + '</p><img src="https://track.example/p.gif">').encode()).decode()
+            self.queries.append(query)
+            return 200, {'id': mid, 'threadId': 't-' + mid, 'snippet': m['body'][:30], 'labelIds': list(self.labels.get(mid, ['INBOX', 'UNREAD'])),
                          'payload': {'mimeType': 'multipart/alternative', 'headers': [{'name': 'From', 'value': m['from']}, {'name': 'To', 'value': m['to']},
                                                                                        {'name': 'Subject', 'value': m['subject']},
                                                                                        {'name': 'Message-ID', 'value': '<abc@example.com>'},
                                                                                        {'name': 'Date', 'value': 'Tue, 3 Nov 2026 09:00:00 +0700'}],
-                                     'parts': [{'mimeType': 'text/plain', 'body': {'data': data}}]}}
+                                     'parts': [{'mimeType': 'text/plain', 'body': {'data': data}}, {'mimeType': 'text/html', 'body': {'data': html}}]}}
         if p == '/gmail/v1/users/me/drafts' and method == 'POST':
             did = f'r{len(self.drafts) + 1}'
             self.drafts[did] = body
@@ -327,6 +383,119 @@ class ConnectTests(QuickBase):
         self.assertEqual(caught.exception.code, 'service_off')
 
 
+    def test_folder_html_and_mail_update(self):
+        self.connect('gmail')
+        found = self.broker.mailcal_call('agent:main', 'mail_search', {'folder': 'inbox', 'query': 'from:anna'})
+        self.assertEqual(found['folder'], 'inbox')
+        self.assertEqual(self.fake.queries[0]['q'], 'in:inbox from:anna')
+        with self.assertRaises(Exception) as caught:
+            self.broker.mailcal_call('agent:main', 'mail_search', {'folder': 'spam'})
+        self.assertEqual(caught.exception.code, 'invalid_arguments')
+        self.fake.queries.clear()
+        self.broker.mailcal_call('agent:main', 'mail_search', {'folder': 'trash'})
+        self.assertEqual((self.fake.queries[0]['q'], self.fake.queries[0].get('includeSpamTrash')), ('in:trash', 'true'))
+        full = self.broker.mailcal_call('agent:main', 'mail_get', {'id': 'm1', 'format': 'html'})
+        self.assertIn('<img src="https://track.example/p.gif">', full['message']['body_html'])  # raw; mail apps sanitize
+        self.assertNotIn('body_html', self.broker.mailcal_call('agent:main', 'mail_get', {'id': 'm1'})['message'])
+        read = self.broker.mailcal_call('agent:main', 'mail_update', {'id': 'm1', 'read': True})
+        self.assertEqual((read['unread'], read['archived']), (False, False))
+        archived = self.broker.mailcal_call('agent:main', 'mail_update', {'id': 'm1', 'archived': True, 'read': False})
+        self.assertEqual((archived['unread'], archived['archived']), (True, True))
+        trashed = self.broker.mailcal_call('agent:main', 'mail_update', {'id': 'm1', 'trashed': True})
+        self.assertTrue(trashed['trashed'])
+        back = self.broker.mailcal_call('agent:main', 'mail_update', {'id': 'm1', 'trashed': False, 'archived': False})
+        self.assertEqual((back['trashed'], back['archived']), (False, False))
+        with self.assertRaises(Exception) as caught:
+            self.broker.mailcal_call('agent:main', 'mail_update', {'id': 'm1', 'read': 'yes'})
+        self.assertEqual(caught.exception.code, 'invalid_arguments')
+        self.assertIn('mail_update', [t['name'] for t in server.tools()])
+
+
+class SignInFlowTests(QuickBase):
+    """Sign in to Composio inside the popup: the project key lands by itself, then Gmail and Calendar follow."""
+    BASE = 'https://box.example/wizard-google/quick/go'
+
+    def step(self, flow, session='s1'):
+        return self.quick.flow_step(session, flow, self.BASE)
+
+    def test_one_popup_signs_in_mints_a_key_then_gmail_then_calendar(self):
+        flow = self.quick.flow_begin('s1')['flow']
+        view, target = self.step(flow)
+        self.assertEqual([s['id'] for s in view['steps']], ['composio', 'gmail', 'calendar'])
+        self.assertEqual(view['where'], 'composio')
+        sid = max(self.fake.cli)
+        self.assertEqual(target, 'https://dashboard.composio.dev/?cliKey=' + sid)
+        view, target = self.step(flow)
+        self.assertEqual((view['where'], view['step']), ('composio', 'composio'))  # still signing in
+        self.fake.link_signin()
+        view, target = self.step(flow)
+        self.assertEqual((view['where'], view['step'], view['label']), ('provider', 'gmail', 'Gmail'))
+        self.assertTrue(target.startswith('https://connect.composio.dev/'))
+        link = self.fake.accounts[max(self.fake.accounts)]
+        self.assertTrue(link['callback'].startswith(self.BASE + '/' + flow + '?attempt=cl-'), link['callback'])
+        self.assertEqual(link['key'], MINTED)
+        keys = self.quick.section()['keys']
+        self.assertEqual([k['key'] for k in keys], [MINTED])
+        self.assertEqual(self.fake.minted[0][:7], 'wizard-')
+        self.fake.activate()
+        view, target = self.step(flow)
+        self.assertEqual((view['step'], view['connected']), ('calendar', ['gmail']))
+        self.fake.activate()
+        view, target = self.step(flow)
+        self.assertEqual((view['state'], target, view['connected']), ('done', None, ['gmail', 'calendar']))
+        self.assertEqual(view['result']['email'], 'me@example.com')
+        a = self.quick.section()['accounts'][view['result']['account']]
+        self.assertEqual(sorted(a['links']), ['calendar', 'gmail'])
+        # The user-level Composio key was used once and never stored.
+        raw = json.dumps(self.broker.state) + ''.join(p.read_text(errors='ignore') for p in __import__('pathlib').Path(self.dir).rglob('*') if p.is_file())
+        self.assertNotIn(USER_KEY, raw)
+        self.assertNotIn(USER_KEY, json.dumps(view))
+
+    def test_session_info_key_is_used_without_minting(self):
+        self.fake.info_key = SECOND
+        flow = self.quick.flow_begin('s1', ['gmail'])['flow']
+        self.step(flow)
+        self.fake.link_signin()
+        view, _ = self.step(flow)
+        self.assertEqual(view['step'], 'gmail')
+        self.assertEqual([k['key'] for k in self.quick.section()['keys']], [SECOND])
+        self.assertEqual(self.fake.minted, [])
+
+    def test_saved_key_skips_composio_sign_in(self):
+        self.quick.add_key(GOOD)
+        flow = self.quick.flow_begin('s1', ['calendar'])['flow']
+        view, target = self.step(flow)
+        self.assertEqual([s['id'] for s in view['steps']], ['calendar'])
+        self.assertTrue(target.startswith('https://connect.composio.dev/'))
+        self.assertEqual(self.fake.cli, {})
+
+    def test_expired_sign_in_and_other_sessions(self):
+        flow = self.quick.flow_begin('s1')['flow']
+        self.step(flow)
+        with self.assertRaises(Exception) as caught:
+            self.step(flow, 's2')
+        self.assertEqual(caught.exception.code, 'flow_not_found')
+        self.fake.cli.clear()
+        view, target = self.step(flow)
+        self.assertEqual((view['state'], view['error']['code'], target), ('failed', 'signin_expired', None))
+        self.assertEqual(self.quick.section()['keys'], [])
+
+    def test_failed_provider_sign_in_ends_the_flow(self):
+        self.quick.add_key(GOOD)
+        flow = self.quick.flow_begin('s1')['flow']
+        self.step(flow)
+        self.fake.accounts[max(self.fake.accounts)]['status'] = 'FAILED'
+        view, target = self.step(flow)
+        self.assertEqual((view['state'], target), ('failed', None))
+        self.assertEqual(self.quick.section()['accounts'], {})
+
+    def test_bad_services_refused(self):
+        for services in (['drive'], ['gmail', 'gmail'], []):
+            with self.assertRaises(Exception) as caught:
+                self.quick.flow_begin('s1', services) if services else self.quick.flow_begin('s1', ['x'])
+            self.assertEqual(caught.exception.code, 'unknown_service')
+
+
 class OwnClientMailTests(unittest.TestCase):
     """The same mail tools on an own-client account (direct Gmail token)."""
 
@@ -392,6 +561,32 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(status, 200)
         status, polled, _ = c.send('GET', '/api/quick/status')
         self.assertEqual(polled['status'], 'connected')
+
+    def test_signin_popup_over_http(self):
+        c = self.owner_session()
+        status, started, _ = c.send('POST', '/api/quick/flow', {'services': ['gmail']})
+        self.assertEqual(status, 200, started)
+        self.assertEqual(started['go'], '/quick/go/' + started['flow'])
+        status, view, _ = c.send('GET', '/api/quick/flow?flow=' + started['flow'])
+        self.assertEqual(status, 200, view)
+        self.assertIn(view['where'], ('composio', 'provider'))
+        import http.client
+        conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=10)
+        conn.request('GET', started['go'], None, {'Host': c.host, 'Cookie': c.cookie})
+        response = conn.getresponse()
+        response.read()
+        self.assertEqual(response.status, 302)
+        self.assertTrue(response.getheader('Location').startswith(('https://dashboard.composio.dev/?cliKey=', 'https://connect.composio.dev/')))
+        conn.close()
+        other = self.owner_session()
+        status, value, _ = other.send('GET', '/api/quick/flow?flow=' + started['flow'])
+        self.assertEqual((status, value['error']['code']), (404, 'flow_not_found'))
+        status, value, _ = c.send('GET', '/api/quick/flow?flow=nope')
+        self.assertEqual(status, 400)
+        status, value, _ = c.send('POST', '/api/quick/flow/cancel', {'flow': started['flow']})
+        self.assertEqual(status, 200)
+        status, page, _ = c.send('GET', started['go'])
+        self.assertEqual(status, 200)
 
     def test_local_api_is_box_only_and_mirrors_mcp(self):
         c = self.Client(self.port)
