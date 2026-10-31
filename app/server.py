@@ -23,8 +23,15 @@ from quick import QuickProblem, valid_attempt, valid_flow  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / 'web'
 APP_ID = 'wizard-google'
-VERSION = '0.3.1'
-ASSETS = {'index.html', 'app.js', 'styles.css', 'boot.js', 'tokens.css', 'ui.css', 'appearance-client.js', 'sheet.js', 'icon.png', 'standalone.css', 'close.js'}
+VERSION = '0.3.2'
+ASSETS = {'index.html', 'app.js', 'styles.css', 'boot.js', 'tokens.css', 'ui.css', 'appearance-client.js', 'sheet.js', 'icon.png', 'standalone.css', 'close.js', 'signin.js'}
+def out_origin(trusted, host, own):
+    """The same box on another of its trusted ports. Wizard keeps links to its own origin inside Wizard, so the
+    Quick connect window opens here instead: a real browser window where Google, Microsoft and Composio allow sign-in."""
+    name = (host or '').split(':')[0].lower()
+    others = sorted(o for o in trusted if o.startswith('https://') and o != own and urllib.parse.urlsplit(o).hostname == name and urllib.parse.urlsplit(o).port)
+    return others[0] if others else own
+
 DEFAULT_SIGNIN_SERVICE = 'https://www.aiwizards.com/wizard-google/auth'
 FORWARDING = ('X-Forwarded-For', 'X-Forwarded-Host', 'Forwarded', 'X-Real-IP')
 SESSION_TTL = 8 * 3600
@@ -254,6 +261,21 @@ def handler_for(app):
             self.send_header('Content-Length', '0')
             self.end_headers()
 
+        def send_signin(self, target, flow):
+            # The Composio step: Composio's page never returns, so signin.js opens it in a small window and moves on.
+            esc = lambda s: s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
+            raw = (f'<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+                   f'<title>Sign in to Composio</title><link rel="stylesheet" href="../../tokens.css"><link rel="stylesheet" href="../../ui.css">'
+                   f'<body><main class="wz-empty" id="signin" data-target="{esc(target)}" data-flow="{esc(flow)}"><strong>Sign in to Composio</strong>'
+                   f'<p id="signin-note">Quick connect uses a free Composio account. Sign in or create one; Wizard saves the key by itself.</p>'
+                   f'<p><a class="wz-button" id="signin-go" href="{esc(target)}">Sign in to Composio</a></p></main>'
+                   f'<script src="../../signin.js"></script></body></html>').encode()
+            self.send_response(200)
+            self.headers_common('text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
         def send_done(self, title, message, close):
             # The popup's last page. close.js closes it when the app opened it; the opener also closes it.
             esc = lambda s: s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
@@ -303,6 +325,11 @@ def handler_for(app):
             if origin not in config.trusted_origins or origin != app.origin_for(host) or (self.headers.get('Sec-Fetch-Site') or 'same-origin').lower() != 'same-origin':
                 raise Problem(403, 'origin_rejected', 'Open this app from your Wizard.')
             return origin
+
+        def flow_links(self, host, flow):
+            shell = app.shell_path_for(host)
+            out = out_origin(config.trusted_origins, host, app.origin_for(host))
+            return {'go': shell + 'quick/go/' + flow, 'go_out': out + shell + 'quick/go/' + flow if out else None}
 
         def flow_base(self, host):
             return (app.origin_for(host) or '').rstrip('/') + app.shell_path_for(host) + 'quick/go'
@@ -409,6 +436,8 @@ def handler_for(app):
                         view, target = app.broker.quick.flow_step(session, go.group(1), self.flow_base(host))
                     except (Problem, QuickProblem) as problem:
                         return self.send_done('Not connected', problem.message, False)
+                    if target and view.get('where') == 'composio':
+                        return self.send_signin(target, go.group(1))
                     if target:
                         return self.send_redirect(target)
                     if view['state'] == 'done':
@@ -442,7 +471,7 @@ def handler_for(app):
                             view, _ = app.broker.quick.flow_step(session, query['flow'], self.flow_base(host))
                         except QuickProblem as problem:
                             raise Problem(problem.status, problem.code, problem.message) from None
-                        return self.send_json(200, {**view, 'go': app.shell_path_for(host) + 'quick/go/' + query['flow']})
+                        return self.send_json(200, {**view, **self.flow_links(host, query['flow'])})
                     raise Problem(404, 'not_found', 'Not found.')
                 self.host()
                 asset = 'index.html' if path in ('', '/') else path.lstrip('/')
@@ -509,7 +538,7 @@ def handler_for(app):
                     '/api/quick/keys': lambda: broker.quick.add_key(body.get('key'), body.get('label')),
                     '/api/quick/start': lambda: broker.quick.start(session, body.get('service'), body.get('account'),
                                                                    origin.rstrip('/') + shell + 'quick/callback'),
-                    '/api/quick/flow': lambda: (lambda f: {**f, 'go': shell + 'quick/go/' + f['flow']})(
+                    '/api/quick/flow': lambda: (lambda f: {**f, **self.flow_links(host, f['flow'])})(
                         broker.quick.flow_begin(session, body.get('services'), body.get('account'))),
                     '/api/quick/flow/cancel': lambda: broker.quick.flow_cancel(session, body.get('flow')),
                 }

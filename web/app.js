@@ -64,7 +64,7 @@
   function go(next) { stack.push(next); sheetClose(); say(''); render(); view.scrollTop = 0; }
   function back() { if (!stack.length) return false; stack.pop(); render(); return true; }
   if (window.WizardApp?.version === 1) {
-    WizardApp.ready({ name: 'wizard-google', version: '0.3.1' });
+    WizardApp.ready({ name: 'wizard-google', version: '0.3.2' });
     WizardApp.back.register({ canGoBack: () => stack.length > 0, back });
   }
 
@@ -348,45 +348,48 @@
   // One popup does it all: Composio sign-in when no key works yet, then each Google sign-in (contract doc, "Connecting from another app").
   function startQuick(service, account) { return runFlow([service, ...queue.splice(0)], account); }
   async function runFlow(services, account) {
-    const tab = window.open('', '_blank');
     stopPolling();
+    // Inside Wizard, a window for this address would open as a Wizard sheet, where Google refuses to sign in. The window
+    // goes to the box's other address instead (out.go_out), which Wizard hands to the browser. On its own, a blank tab
+    // opened inside the tap keeps the popup allowed while the sign-in is prepared.
+    const framed = window.top !== window;
+    const tab = framed ? null : window.open('', '_blank');
     try {
       const out = await api('api/quick/flow', { services, account: account ? account.id : null });
-      const go = new URL(out.go, location.href).href;
+      const go = new URL((framed && out.go_out) || out.go, location.href).href;
       if (tab) { tab.opener = null; tab.location.href = go; }
-      flowSheet(out.flow, go, tab, null);
-      pollFlow(out.flow, go, tab);
+      flowSheet(out.flow, go, tab, null, out);
+      pollFlow(out.flow, go, tab, out);
     } catch (e) { if (tab) tab.close(); sheetClose(); say(e.message); }
   }
-  function flowSheet(flow, go, tab, view) {
-    const label = view && view.label ? view.label : 'Google';
-    const text = view && view.where === 'composio'
-      ? 'Sign in or create a free Composio account in the new window. Your key is saved by itself.'
-      : `Choose your Google account and allow access for ${label}. This page updates by itself.`;
+  function flowSheet(flow, go, tab, v, out) {
+    const first = !tab && !v;
+    const label = v && v.label ? v.label : 'Google';
+    const where = v ? v.where : (out && out.steps && out.steps[0] && out.steps[0].id);
+    const text = first ? 'Open the sign-in window to continue. It closes by itself when you are done.'
+      : where === 'composio' ? 'In the new window, sign in to Composio or create a free account. Your key is saved by itself, then Google asks for access.'
+        : `In the new window, choose your Google account and allow access for ${label}. This page updates by itself.`;
     const steps = el('div', null, 'wz-list');
-    for (const s of (view ? view.steps : [])) steps.append(row(s.label, s.done ? 'Done' : (s.id === view.step ? 'Now' : 'Next'), null, s.done ? '✓' : '·'));
-    const again = button(tab && !tab.closed ? 'Show the window' : 'Continue', () => { const t = window.open(go, '_blank'); if (t) { t.opener = null; pollFlow(flow, go, t); } }, 'wz-button secondary');
-    openSheet('Finish in the new window', el('p', text, 'muted'), steps, el('div', null, 'spinner', { 'aria-hidden': 'true' }),
+    for (const s of ((v || out || {}).steps || [])) steps.append(row(s.label, s.done ? 'Done' : (v && s.id === v.step ? 'Now' : 'Next'), null, s.done ? '✓' : '·'));
+    const again = link(first ? 'Open the sign-in window ↗' : 'Open the window again ↗', go, first ? 'wz-button' : 'wz-button secondary');
+    again.addEventListener('click', e => { if (!framed()) { e.preventDefault(); const t = window.open(go, '_blank'); if (t) { t.opener = null; pollFlow(flow, go, t, out); } } });
+    openSheet(first ? 'Connect Google' : 'Finish in the new window', el('p', text, 'muted'), steps, first ? '' : el('div', null, 'spinner', { 'aria-hidden': 'true' }),
       actionsOf(again, button('Cancel', () => { stopPolling(); api('api/quick/flow/cancel', { flow }).catch(() => {}); if (tab && !tab.closed) tab.close(); sheetClose(); }, 'wz-button secondary')));
   }
-  function pollFlow(flow, go, tab) {
+  function framed() { return window.top !== window; }
+  function pollFlow(flow, go, tab, out) {
     stopPolling();
     const mine = ++seq;
-    let where = null, shown = '';
+    let shown = '';
     polling = setInterval(async () => {
       try {
         const v = await api('api/quick/flow?flow=' + encodeURIComponent(flow));
         if (mine !== seq) return;
-        if (v.state === 'done') {
-          stopPolling(); if (tab && !tab.closed) tab.close(); sheetClose(); await refresh();
-          say(`Connected ${(v.result && v.result.email) || 'your account'}.`, true); return;
-        }
+        if (v.state === 'done') { stopPolling(); if (tab && !tab.closed) tab.close(); sheetClose(); await refresh(); say(`Connected ${(v.result && v.result.email) || 'your account'}.`, true); return; }
         if (v.state !== 'running') { stopPolling(); if (tab && !tab.closed) tab.close(); sheetClose(); if (v.error) say(v.error.message); await refresh(); return; }
-        // Composio's own page does not come back by itself: bring the window back once the key has landed.
-        if (where === 'composio' && v.where !== 'composio' && tab && !tab.closed) { try { tab.location.href = go; } catch (_) { /* window gone */ } }
-        where = v.where;
-        const sig = v.step + v.where + (tab && tab.closed);
-        if (sig !== shown) { shown = sig; flowSheet(flow, go, tab, v); }
+        // The window itself moves from Composio to the next sign-in (signin.js); here the sheet only follows along.
+        const sig = v.step + v.where;
+        if (sig !== shown) { shown = sig; flowSheet(flow, go, tab, v, out); }
       } catch { /* keep waiting */ }
     }, 1500);
   }
@@ -524,7 +527,7 @@
 
   async function startSignIn(account, services) {
     // Open the tab inside the tap so it is not blocked, then point it at Google.
-    const tab = window.open('', '_blank');
+    const tab = framed() ? null : window.open('', '_blank'); // inside Wizard the Open Google link below hands Google to the browser
     try {
       const out = await api('api/oauth/start', { account: account ? account.id : null, services });
       if (tab) { tab.opener = null; tab.location.href = out.authorization_url; }

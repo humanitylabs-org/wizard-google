@@ -574,9 +574,15 @@ class HttpTests(unittest.TestCase):
         conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=10)
         conn.request('GET', started['go'], None, {'Host': c.host, 'Cookie': c.cookie})
         response = conn.getresponse()
-        response.read()
-        self.assertEqual(response.status, 302)
-        self.assertTrue(response.getheader('Location').startswith(('https://dashboard.composio.dev/?cliKey=', 'https://connect.composio.dev/')))
+        page = response.read().decode()
+        if view['where'] == 'composio':  # Composio's page never returns: the window opens it in a small window of its own
+            self.assertEqual(response.status, 200)
+            self.assertIn('data-target="https://dashboard.composio.dev/?cliKey=', page)
+            self.assertIn('src="../../signin.js"', page)
+            self.assertIn("script-src 'self'", response.getheader('Content-Security-Policy'))
+        else:
+            self.assertEqual(response.status, 302)
+            self.assertTrue(response.getheader('Location').startswith('https://connect.composio.dev/'))
         conn.close()
         other = self.owner_session()
         status, value, _ = other.send('GET', '/api/quick/flow?flow=' + started['flow'])
@@ -587,6 +593,17 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(status, 200)
         status, page, _ = c.send('GET', started['go'])
         self.assertEqual(status, 200)
+
+    def test_window_goes_to_the_boxs_other_address(self):
+        # Wizard keeps windows for its own address inside Wizard; the sign-in window uses another trusted port instead.
+        trusted = {'https://box.ts.net', 'https://box.ts.net:8444', 'https://box.ts.net:8796', 'https://box.ts.net:8806', 'http://127.0.0.1:1', 'https://evil.example:8796'}
+        self.assertEqual(server.out_origin(trusted, 'box.ts.net:8444', 'https://box.ts.net:8444'), 'https://box.ts.net:8796')
+        self.assertEqual(server.out_origin(trusted, 'box.ts.net:8796', 'https://box.ts.net:8796'), 'https://box.ts.net:8444')
+        self.assertEqual(server.out_origin({'https://box.ts.net:8444'}, 'box.ts.net:8444', 'https://box.ts.net:8444'), 'https://box.ts.net:8444')
+        self.assertIsNone(server.out_origin(set(), '127.0.0.1:5', None))
+        c = self.owner_session()
+        status, started, _ = c.send('POST', '/api/quick/flow', {'services': ['gmail']})
+        self.assertEqual(started['go_out'], c.origin + '/quick/go/' + started['flow'])  # loopback test host: no other port
 
     def test_local_api_is_box_only_and_mirrors_mcp(self):
         c = self.Client(self.port)
