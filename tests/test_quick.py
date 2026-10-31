@@ -386,6 +386,7 @@ class ConnectTests(QuickBase):
             self.broker.mailcal_call('agent:main', 'calendar_list_events', {})
         self.assertEqual(caught.exception.code, 'service_off')
         self.connect('calendar', first['account'])
+        self.broker.access.set(calendar='can_edit')  # the owner lets agents edit: changes apply straight away
         listed = self.broker.mailcal_call('agent:main', 'calendar_list_events', {'time_min': '2026-11-01T00:00:00+07:00'})
         self.assertEqual(listed['events'][0]['title'], 'Standup')
         self.assertEqual(listed['events'][0]['my_response'], 'none')
@@ -402,6 +403,81 @@ class ConnectTests(QuickBase):
         with self.assertRaises(Exception) as caught:
             self.broker.mailcal_call('agent:main', 'calendar_create_event', {'title': 'x', 'start': 'tomorrow', 'end': 'later'})
         self.assertEqual(caught.exception.code, 'invalid_arguments')
+
+    def test_calendar_agent_levels_and_suggestions(self):
+        first = self.connect('gmail')
+        self.connect('calendar', first['account'])
+        before = dict(self.fake.events)
+        # Suggest only is the default: an agent's change is kept for the owner, nothing reaches the calendar.
+        self.assertEqual(self.broker.access.calendar_level(), 'suggest_only')
+        made = self.broker.mailcal_call('agent:main', 'calendar_create_event', {'title': 'Dentist', 'start': '2026-11-04T10:00:00+07:00',
+                                                                                'end': '2026-11-04T11:00:00+07:00'})
+        self.assertEqual((made['suggested'], made['applied'], made['suggestion']['action']), (True, False, 'create'))
+        self.assertEqual(self.fake.events, before)
+        moved = self.broker.mailcal_call('agent:helper', 'calendar_update_event', {'id': 'ev0', 'title': 'Moved'})
+        self.broker.mailcal_call('agent:main', 'calendar_respond', {'id': 'ev0', 'response': 'declined'})
+        self.assertEqual(self.fake.events, before)
+        listed = self.broker.mailcal_call('agent:main', 'calendar_suggestions', {})['suggestions']
+        self.assertEqual([x['action'] for x in listed], ['create', 'update', 'respond'])
+        self.assertEqual(listed[1]['agent'], 'agent:helper')
+        # Bad arguments are refused at once, not kept.
+        with self.assertRaises(Exception) as caught:
+            self.broker.mailcal_call('agent:main', 'calendar_create_event', {'title': 'x', 'start': 'tomorrow', 'end': 'later'})
+        self.assertEqual(caught.exception.code, 'invalid_arguments')
+        self.assertEqual(len(self.broker.suggestions.list()), 3)
+        # Agents cannot approve or dismiss, whatever they call themselves.
+        for who in ('agent:main', 'agent:wizard-calendar', 'host:agent-service'):
+            for tool in ('calendar_suggestion_approve', 'calendar_suggestion_dismiss'):
+                with self.assertRaises(Exception) as caught:
+                    self.broker.mailcal_call(who, tool, {'id': made['suggestion']['id']})
+                self.assertEqual(caught.exception.code, 'agent_approve_refused')
+        # The owner's Approve in Calendar (Calendar's grant) applies it through the owner path.
+        done = self.broker.mailcal_call('app:wizard-calendar', 'calendar_suggestion_approve', {'id': made['suggestion']['id']})
+        self.assertTrue(done['approved'])
+        eid = done['result']['event']['id']
+        self.assertEqual(self.fake.events[eid]['summary'], 'Dentist')
+        # Dismiss drops it; nothing changes.
+        self.broker.mailcal_call('app:wizard-calendar', 'calendar_suggestion_dismiss', {'id': moved['suggestion']['id']})
+        self.assertNotEqual(self.fake.events['ev0'].get('summary'), 'Moved')
+        self.assertEqual([x['action'] for x in self.broker.suggestions.list()], ['respond'])
+        with self.assertRaises(Exception) as caught:
+            self.broker.mailcal_call('app:wizard-calendar', 'calendar_suggestion_approve', {'id': moved['suggestion']['id']})
+        self.assertEqual(caught.exception.code, 'suggestion_not_found')
+        # Read-only: reads work, changes and the suggestion list are refused. The mail level is untouched.
+        self.broker.access.set('read_only')
+        self.broker.access.set(calendar='read_only')
+        self.assertEqual(self.broker.access.level(), 'read_only')
+        self.broker.mailcal_call('agent:main', 'calendar_list_events', {})
+        for tool, args in (('calendar_create_event', {'title': 'x', 'start': '2026-11-04', 'end': '2026-11-05'}), ('calendar_suggestions', {})):
+            with self.assertRaises(Exception) as caught:
+                self.broker.mailcal_call('agent:main', tool, args)
+            self.assertEqual(caught.exception.code, 'agent_access_denied')
+        # No access: nothing at all. A damaged settings file fails closed.
+        self.broker.access.set(calendar='no_access')
+        with self.assertRaises(Exception) as caught:
+            self.broker.mailcal_call('agent:main', 'calendar_list_events', {})
+        self.assertEqual(caught.exception.code, 'agent_access_denied')
+        self.broker.access.set(calendar='can_edit')
+        self.broker.access.path.write_text('{not json')
+        with self.assertRaises(Exception) as caught:
+            self.broker.mailcal_call('agent:main', 'calendar_list_events', {})
+        self.assertEqual(caught.exception.code, 'agent_access_denied')
+        # Can edit: applies straight away. The owner's own changes always apply.
+        self.broker.access.set('draft_only', 'can_edit')
+        made = self.broker.mailcal_call('agent:main', 'calendar_create_event', {'title': 'Gym', 'start': '2026-11-05', 'end': '2026-11-06'})
+        self.assertTrue(made['created'])
+        self.broker.access.set(calendar='suggest_only')
+        self.assertTrue(self.broker.mailcal_call('app:wizard-calendar', 'calendar_create_event',
+                                                 {'title': 'Mine', 'start': '2026-11-06', 'end': '2026-11-07'})['created'])
+        # gog: agents only read the calendar below Can edit.
+        flags = self.broker.access.gog_flags('agent:main', 'calendar')
+        self.assertIn('--readonly', flags)
+        self.assertIn('calendar.create', flags[1])
+        self.assertEqual(self.broker.access.gog_flags('app:wizard-calendar', 'calendar'), [])
+        status = self.broker.agent_status()
+        self.assertEqual(status['calendar_access']['level'], 'suggest_only')
+        self.assertNotIn('mail_send', status['mail_calendar']['tools'])
+        self.assertNotIn('calendar_suggestion_approve', status['mail_calendar']['tools'])
 
     def test_revoked_at_composio_asks_to_reconnect(self):
         self.connect('gmail')

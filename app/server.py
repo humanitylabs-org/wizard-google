@@ -19,11 +19,12 @@ from broker import Broker, Problem  # noqa: E402
 from google import OPERATIONS, SERVICES  # noqa: E402
 import mailcal  # noqa: E402
 from quick import QuickProblem, valid_attempt, valid_flow  # noqa: E402
+from agent_access import SUGGESTION_TOOLS, SUGGESTION_MCP_TOOLS  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / 'web'
 APP_ID = 'wizard-google'
-VERSION = '0.3.7'
+VERSION = '0.3.8'
 ASSETS = {'index.html', 'app.js', 'styles.css', 'boot.js', 'tokens.css', 'ui.css', 'appearance-client.js', 'sheet.js', 'icon.png', 'standalone.css', 'close.js', 'signin.js'}
 def out_origin(trusted, host, own):
     """The same box on another of its trusted ports. Wizard keeps links to its own origin inside Wizard, so the
@@ -149,7 +150,7 @@ def tools():
         {'name': 'google_help', 'description': 'gog\'s own machine-readable help for a command, e.g. "gmail search" or "calendar create": its flags, arguments '
                                                'and output. Empty lists the command groups you may use.',
          'annotations': {'readOnlyHint': True}, 'inputSchema': {'type': 'object', 'properties': {'command': {'type': 'string'}}}},
-    ] + mailcal.mcp_tools()
+    ] + mailcal.mcp_tools() + SUGGESTION_MCP_TOOLS
 
 
 def rpc(app, message, caller):
@@ -178,7 +179,7 @@ def rpc(app, message, caller):
             value = broker.run_gog(caller, args.get('args'), args.get('account'))
         elif name == 'google_help':
             value = broker.gog_help(args.get('command') or '')
-        elif name in mailcal.TOOLS:
+        elif name in mailcal.TOOLS or name in SUGGESTION_TOOLS:
             value = broker.mailcal_call(caller, name, args)
         else:
             return {'jsonrpc': '2.0', 'id': rid, 'error': {'code': -32602, 'message': 'Unknown tool'}}
@@ -472,6 +473,8 @@ def handler_for(app):
                         return self.send_json(200, app.broker.quick.status(session))
                     if path == '/api/mail-settings':
                         return self.send_json(200, app.broker.mail_settings())
+                    if path == '/api/calendar-settings':
+                        return self.send_json(200, app.broker.calendar_settings())
                     if path == '/api/quick/flow':
                         if not valid_flow(query.get('flow')):
                             raise Problem(400, 'invalid_flow', 'Unknown sign-in.')
@@ -510,7 +513,7 @@ def handler_for(app):
                     # Box-only HTTP mirror of the MCP mail/calendar tools, for scripts and Wizard apps on this box.
                     caller = self.mcp_caller()
                     self.host()
-                    if local.group(1) not in mailcal.TOOLS:
+                    if local.group(1) not in mailcal.TOOLS and local.group(1) not in SUGGESTION_TOOLS:
                         raise Problem(404, 'not_found', 'Not found.')
                     return self.send_json(200, app.broker.mailcal_call(caller, local.group(1), self.body()))
                 if path.startswith('/consumer/v1/'):
@@ -542,7 +545,7 @@ def handler_for(app):
                     '/api/setup/wizard': broker.use_wizard_client,
                     '/api/oauth/cancel': lambda: broker.cancel(session),
                     '/api/grants': lambda: broker.set_grant(body.get('client'), body.get('account'), body.get('operations')),
-                    '/api/agent-access': lambda: broker.set_agent_access(body.get('mail')),
+                    '/api/agent-access': lambda: broker.set_agent_access(body),
                     '/api/keys': lambda: broker.create_key(body.get('client')),
                     '/api/quick/keys': lambda: broker.quick.add_key(body.get('key'), body.get('label')),
                     '/api/quick/start': lambda: broker.quick.start(session, body.get('service'), body.get('account'),
