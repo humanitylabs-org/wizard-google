@@ -166,7 +166,9 @@ class LoopbackOwner(unittest.TestCase):
             self.assertEqual(status, 403, headers)
         status, value, _ = c.send('POST', '/mcp', {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'}, browser=False)
         names = {t['name'] for t in value['result']['tools']}
-        self.assertEqual(names, {'google_status', 'google_run', 'google_help'})
+        self.assertEqual(names, {'google_status', 'google_run', 'google_help', 'mail_search', 'mail_get', 'mail_draft', 'mail_send', 'mail_update',
+                                 'calendar_list_events', 'calendar_create_event', 'calendar_update_event', 'calendar_delete_event',
+                                 'calendar_respond'})
 
     def test_4_owner_writes_need_csrf_and_same_origin(self):
         status, _, _ = self.owner.send('POST', '/api/setup/step', {'step': 'publish', 'done': True}, {'X-CSRF-Token': 'wrong'})
