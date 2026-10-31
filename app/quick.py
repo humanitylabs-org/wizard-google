@@ -243,12 +243,12 @@ class Quick:
         return a
 
     def set_service(self, account_id, service, on):
-        a = self.account(account_id)
         if service not in TOOLKITS or not isinstance(on, bool):
             raise QuickProblem(400, 'unknown_service', 'Quick connect covers Gmail and Calendar.')
-        if on and service not in a['links']:
-            raise QuickProblem(409, 'consent_needed', f'Connect {LABELS[service]} first.', service=service, account=account_id)
         with self.broker.lock:
+            a = self.account(account_id)
+            if on and service not in a['links']:
+                raise QuickProblem(409, 'consent_needed', f'Connect {LABELS[service]} first.', service=service, account=account_id)
             services = set(a['services'])
             services.add(service) if on else services.discard(service)
             a['services'] = sorted(services)
@@ -256,10 +256,10 @@ class Quick:
         return {'account': self.account_view(a)}
 
     def set_label(self, account_id, label):
-        a = self.account(account_id)
         if not isinstance(label, str) or len(label.strip()) > 40:
             raise QuickProblem(400, 'invalid_label', 'Use a short name, like Work or Personal.')
         with self.broker.lock:
+            a = self.account(account_id)
             a['label'] = label.strip()
             self.broker._commit(self.broker.state)
         return {'account': self.account_view(a)}

@@ -97,6 +97,27 @@ class TidyPreservationTests(unittest.TestCase):
         self.assertEqual(self.broker.state['quick']['accounts']['new']['status'], 'reauth_required')
         self.assertEqual(self.saved[-1]['quick']['accounts']['new']['status'], 'reauth_required')
 
+    def test_owner_edits_resolve_account_after_acquiring_lock(self):
+        for operation in ('label', 'service'):
+            with self.subTest(operation=operation):
+                self.account('new', 'gmail')
+                self.state['quick']['accounts']['new'].update(label='', status='active')
+                broker = self.broker
+                class ReplacingLock:
+                    def __enter__(self):
+                        broker.state = copy.deepcopy(broker.state)
+                    def __exit__(self, *args):
+                        return False
+                broker.lock = ReplacingLock()
+                if operation == 'label':
+                    self.quick.set_label('new', 'Work')
+                    self.assertEqual(broker.state['quick']['accounts']['new']['label'], 'Work')
+                    self.assertEqual(self.saved[-1]['quick']['accounts']['new']['label'], 'Work')
+                else:
+                    self.quick.set_service('new', 'gmail', False)
+                    self.assertEqual(broker.state['quick']['accounts']['new']['services'], [])
+                    self.assertEqual(self.saved[-1]['quick']['accounts']['new']['services'], [])
+
     def test_old_connection_failure_does_not_mark_reconnected_account(self):
         import google
         self.account('new', 'gmail')
