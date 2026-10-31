@@ -43,6 +43,40 @@ class Quick:
         self.links = composio.Links(clock)
         self.lock = threading.RLock()
         self.guide = composio.Guide(_GuideAdapter(self), transport, clock)
+        threading.Thread(target=self.tidy, daemon=True).start()
+
+    def tidy(self):
+        """Fold Quick connect accounts that share an email into one (the newest keeps its links) and
+        ask Composio to drop the replaced sign-ins. Safe to run any time."""
+        stale = []
+        try:
+            with self.broker.lock:
+                accounts = self.section()['accounts']
+                by_email = {}
+                for a in sorted(accounts.values(), key=lambda a: a.get('added', 0), reverse=True):
+                    email = (a.get('email') or '').lower()
+                    if not email:
+                        continue
+                    keep = by_email.setdefault(email, a)
+                    if keep is a:
+                        continue
+                    for service, ca in a['links'].items():
+                        if service in keep['links'] or keep['key_id'] != a['key_id'] or keep['user_id'] != a['user_id']:
+                            stale.append((a['key_id'], ca))
+                        else:
+                            keep['links'][service] = ca
+                            keep['services'] = sorted(set(keep['services']) | ({service} & set(a['services'])))
+                    accounts.pop(a['id'], None)
+                if stale:
+                    self.broker._commit(self.broker.state)
+        except Exception:
+            return 0
+        for key_id, ca in stale:
+            try:
+                self.keys().client(key_id).remove(ca, revoke=False)
+            except Exception:
+                pass
+        return len(stale)
 
     # ---------- guided popup (Sign in to Composio if needed, then Gmail, then Calendar) ----------
     def flow_begin(self, session, services=None, account=None):
@@ -166,7 +200,8 @@ class Quick:
             accounts = self.section()['accounts']
             target = accounts.get(attempt['account']) if attempt['account'] else None
             if not target and email:
-                target = next((a for a in accounts.values() if a['email'] == email and a['key_id'] == attempt['key_id']), None)
+                target = next((a for a in accounts.values() if a['email'] == email and a['key_id'] == attempt['key_id']
+                               and a['user_id'] == attempt['user_id']), None)
             if target and target.get('email') and email and target['email'] != email:
                 raise QuickProblem(409, 'wrong_account', f'You signed in as {email}, not {target["email"]}. Choose the same account.')
             if target and target['user_id'] != attempt['user_id']:
@@ -182,6 +217,7 @@ class Quick:
             target['email'] = target['email'] or email
             target['scopes'] = found.get('scopes', [])
             self.broker._commit(self.broker.state)
+        self.tidy()
         return {'account': target['id'], 'email': target['email'], 'service': service}
 
     # ---------- accounts ----------
@@ -216,10 +252,12 @@ class Quick:
     def disconnect(self, account_id):
         a = self.account(account_id)
         removed_everywhere = True
+        twins = [o for o in self.section()['accounts'].values()
+                 if o['id'] != account_id and a.get('email') and o.get('email') == a['email']]
         try:
             client = self.keys().client(a['key_id'])
             for ca in a['links'].values():
-                client.remove(ca)
+                client.remove(ca, revoke=not twins)
         except composio.ComposioError:
             removed_everywhere = False
         with self.broker.lock:

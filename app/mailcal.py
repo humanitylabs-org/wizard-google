@@ -5,6 +5,7 @@ runs for an owner's own Google client (a direct token) and for Quick connect (Co
 Mail content comes from outside senders: it is returned as data and marked untrusted, never acted on.
 """
 import base64
+import html
 import re
 import urllib.parse
 from email.message import EmailMessage
@@ -68,12 +69,19 @@ def _attachments(part, found=None):
     return found[:50]
 
 
+def _snippet(value):
+    # Gmail snippets are HTML-escaped and padded with invisible preheader filler.
+    value = html.unescape(str(value or ''))
+    value = re.sub(r'[\u034f\u200b-\u200f\u2060\ufeff\u00ad]+', '', value)
+    return re.sub(r'\s+', ' ', value).strip()[:300]
+
+
 def _summary(message):
     h = _headers(message)
     labels = message.get('labelIds') or []
     return {'id': message.get('id'), 'thread_id': message.get('threadId'), 'from': (_people(h.get('from')) or [None])[0],
             'to': _people(h.get('to')), 'cc': _people(h.get('cc')), 'subject': h.get('subject', ''), 'date': _iso(h.get('date')),
-            'snippet': str(message.get('snippet', ''))[:300], 'unread': 'UNREAD' in labels, 'labels': labels[:20]}
+            'snippet': _snippet(message.get('snippet')), 'unread': 'UNREAD' in labels, 'labels': labels[:20]}
 
 
 def _folder(args):
@@ -101,7 +109,7 @@ def mail_search(call, args):
         mid = str(item.get('id', ''))
         if re.fullmatch(MID, mid):
             found.append(_summary(call('GET', f'{GMAIL}/messages/{mid}', {
-                'format': 'metadata', 'metadataHeaders': ['From', 'To', 'Cc', 'Subject', 'Date']})))
+                'format': 'metadata'})))  # no metadataHeaders: Composio's proxy keeps only the last repeated value
     return {'folder': folder, 'messages': found, 'next_page_token': listing.get('nextPageToken'), 'untrusted': UNTRUSTED}
 
 
@@ -169,7 +177,7 @@ def mail_draft(call, args):
     body = text(args, 'body', 50_000)
     message, thread = EmailMessage(), None
     if reply:
-        original = call('GET', f'{GMAIL}/messages/{reply}', {'format': 'metadata', 'metadataHeaders': ['Subject', 'From', 'Reply-To', 'Message-ID', 'References']})
+        original = call('GET', f'{GMAIL}/messages/{reply}', {'format': 'metadata'})
         h = _headers(original)
         thread = original.get('threadId')
         if not to:

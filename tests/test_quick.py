@@ -114,6 +114,8 @@ class FakeComposio:
             if ca not in self.accounts or self.accounts[ca]['status'] != 'ACTIVE':
                 return 400, {'error': {'message': 'Connected account is not active', 'code': 1, 'slug': 'x', 'status': 400}}
             query = {p['name']: p['value'] for p in body.get('parameters') or [] if p['type'] == 'query'}
+            # Composio's proxy keeps only the last of a repeated query name, so a header list would lose senders.
+            assert 'metadataHeaders' not in query, 'metadataHeaders through the proxy drops From/Subject'
             status, data = self.provider(body['method'], body['endpoint'], query, body.get('body'))
             return 200, {'data': data, 'status': status, 'headers': {}}
         return 404, {'error': {'message': 'no route', 'code': 1, 'slug': 'x', 'status': 404}}
@@ -638,6 +640,23 @@ class HttpTests(unittest.TestCase):
         status, value, _ = c.send('GET', '/v1/status', None, browser=False)
         self.assertEqual(status, 200)
         self.assertIn('mail_calendar', value)
+
+class TidyTests(QuickBase):
+    def test_same_email_twice_folds_into_the_newest_without_revoking(self):
+        self.quick.add_key(GOOD)
+        key_id = self.quick.section()['keys'][0]['id']
+        accts = self.quick.section()['accounts']
+        accts['q-old'] = {'id': 'q-old', 'email': 'me@example.com', 'label': '', 'user_id': 'u', 'key_id': key_id,
+                          'links': {'gmail': 'ca_old'}, 'services': ['gmail'], 'added': 1, 'status': 'active'}
+        accts['q-new'] = {'id': 'q-new', 'email': 'me@example.com', 'label': '', 'user_id': 'u', 'key_id': key_id,
+                          'links': {'gmail': 'ca_new', 'calendar': 'ca_cal'}, 'services': ['calendar', 'gmail'], 'added': 2, 'status': 'active'}
+        self.fake.accounts.update({'ca_old': {'status': 'ACTIVE', 'toolkit': 'gmail', 'key': GOOD, 'callback': None}})
+        self.assertEqual(self.quick.tidy(), 1)
+        self.assertEqual(sorted(self.quick.section()['accounts']), ['q-new'])
+        self.assertEqual(self.quick.section()['accounts']['q-new']['links']['gmail'], 'ca_new')
+        self.assertIn('ca_old', self.fake.removed)
+        self.assertFalse(any(c[1].endswith('ca_old/revoke') for c in self.fake.calls), self.fake.calls)
+        self.assertEqual(self.quick.tidy(), 0)
 
 
 if __name__ == '__main__':

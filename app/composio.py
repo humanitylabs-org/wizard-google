@@ -161,14 +161,19 @@ class Client:
                 'toolkit': str(toolkit.get('slug') or '').lower(), 'reason': value.get('status_reason'),
                 'scopes': [s for s in value.get('requested_scopes') or [] if isinstance(s, str)][:40]}
 
-    def remove(self, account_id):
-        """Revoke at the provider (best effort), then delete the connection at Composio."""
+    def remove(self, account_id, revoke=True):
+        """Revoke at the provider (best effort), then delete the connection at Composio.
+
+        revoke=False when another connection of the same provider account stays: a provider revoke ends
+        every token of that sign-in grant, including the one being kept."""
         quoted = urllib.parse.quote(account_id, safe='')
-        revoked = True
-        try:
-            self._call('POST', f'/connected_accounts/{quoted}/revoke', {})
-        except ComposioError:
-            revoked = False
+        revoked = False
+        if revoke:
+            try:
+                self._call('POST', f'/connected_accounts/{quoted}/revoke', {})
+                revoked = True
+            except ComposioError:
+                revoked = False
         try:
             self._call('DELETE', f'/connected_accounts/{quoted}')
         except ComposioError as error:
