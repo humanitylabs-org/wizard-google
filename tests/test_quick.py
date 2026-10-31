@@ -58,7 +58,7 @@ class FakeComposio:
                 return 404, {'error': {'message': 'CLI session not found or expired', 'code': 2100, 'slug': 'CLI_SessionNotFound', 'status': 404}}
             return 200, {'id': query['id'], 'code': 'AB12CD', 'status': state, 'expiresAt': '2026-11-03T09:10:00Z', 'scope': 'project',
                          'account': {'id': 'u1', 'email': 'owner@example.com', 'name': 'Owner'} if state == 'linked' else None,
-                         'api_key': USER_KEY if state == 'linked' else None}
+                         'api_key': (getattr(self, 'linked_key', None) or USER_KEY) if state == 'linked' else None}
         if headers.get('x-user-api-key') != USER_KEY:
             return 401, {'error': {'message': 'Invalid or revoked user API key', 'code': 2113, 'slug': 'UserApiKey_Unauthorized', 'status': 401}}
         if method == 'GET' and path == '/api/v3.1/auth/session/info':
@@ -470,6 +470,19 @@ class SignInFlowTests(QuickBase):
         view, _ = self.step(flow)
         self.assertEqual(view['step'], 'gmail', view)
         self.assertEqual([k['key'] for k in self.quick.section()['keys']], [MINTED])
+
+    def test_project_scoped_sign_in_hands_back_a_project_key(self):
+        # Composio's project-scope sign-in can return the picked project's own key: store it, no user-key calls.
+        self.fake.keys.add(SECOND)
+        flow = self.quick.flow_begin('s1', ['gmail'])['flow']
+        self.step(flow)
+        sid = max(self.fake.cli)
+        self.fake.cli[sid] = 'linked'
+        self.fake.linked_key = SECOND
+        view, _ = self.step(flow)
+        self.assertEqual(view['step'], 'gmail', view)
+        self.assertEqual([k['key'] for k in self.quick.section()['keys']], [SECOND])
+        self.assertEqual(self.fake.minted, [])
 
     def test_saved_key_skips_composio_sign_in(self):
         self.quick.add_key(GOOD)
