@@ -15,8 +15,11 @@ import time
 import urllib.parse
 
 import google
+import mailcal
 import setup_flow
 import gogrun
+from quick import Quick, QuickProblem
+from agent_access import AgentAccess, AccessRefused, Suggestions, SUGGESTION_TOOLS, DryRun, dry_call
 from google import OPERATIONS, IDENTITY_SCOPES, SERVICES, GoogleError, BadArgs
 from store import Store
 
@@ -62,9 +65,13 @@ def client_label(client):
 
 class Broker:
     def __init__(self, data_dir, *, transport=None, store_key=None, relay_callback='', signin_service='', clock=time.time,
-                 gog=None):
+                 gog=None, composio_transport=None):
         self.store = Store(data_dir, store_key)
         self.state = self.store.load()
+        # The owner's choice of what agents may do with mail (Mail > Settings > Agent access). Draft only by default.
+        self.access = AgentAccess(data_dir)
+        # Calendar changes agents suggested at Suggest only, waiting for the owner's Approve / Dismiss in Calendar.
+        self.suggestions = Suggestions(data_dir)
         # Wizard's Google app: a stateless sign-in service holds the shared client's secret and the
         # fixed return page. Sign-ins, tokens and every Google call stay on this box.
         self.signin_service = (signin_service or '').rstrip('/')
@@ -77,6 +84,8 @@ class Broker:
         self.lock = threading.RLock()
         self.account_locks = {}
         self.flows = {}  # sha(state) -> pending sign-in; memory only, 10 minutes
+        # Quick connect (Composio): Gmail and Calendar without a Google Cloud project.
+        self.quick = Quick(self, transport=composio_transport, clock=clock)
 
     # ---------- state ----------
 
@@ -771,16 +780,22 @@ class Broker:
         except self.gog.RunProblem as problem:
             self._record(caller, account, f'gog:{root or "?"}', problem.code)
             raise Problem(403 if problem.code == 'service_off' else 400, problem.code, problem.message) from None
+        try:
+            extra = self.access.gog_flags(caller, root)  # gmail for agents: gog itself refuses sending (and more below Draft only)
+        except AccessRefused as refused:
+            self._record(caller, account, f'gog:{root}', refused.code)
+            raise Problem(refused.status, refused.code, refused.message) from None
+        kw = {'extra': extra} if extra else {}
         # Only the token fetch holds the account lock; gog itself runs unlocked so calls can overlap.
         with self._account_lock(account):
             token = self._token(account)
         try:
-            result = self.gog.run(args, token, roots)
+            result = self.gog.run(args, token, roots, **kw)
             if result['exit_code'] == 4:  # gog: auth_required. One retry with a fresh token.
                 with self._account_lock(account):
                     self._expire(account)
                     token = self._token(account)
-                result = self.gog.run(args, token, roots)
+                result = self.gog.run(args, token, roots, **kw)
         except self.gog.RunProblem as problem:
             self._record(caller, account, f'gog:{root}', problem.code)
             raise Problem(502 if problem.code in ('gog_missing', 'timeout') else 400, problem.code, problem.message) from None
@@ -799,12 +814,20 @@ class Broker:
     def agent_status(self):
         """What the owner's agents can use. Never a token."""
         client = self.state.get('client')
-        return {'connected': bool(client) and any(a['status'] == 'active' for a in self.state['accounts'].values()),
+        return {'connected': (bool(client) and any(a['status'] == 'active' for a in self.state['accounts'].values()))
+                or any(a['status'] == 'active' for a in self.quick.section()['accounts'].values()),
                 'sign_in': (client or {}).get('mode', 'own') if client else None,
+                'mail_access': self.access.agent_view(),
+                'calendar_access': self.access.calendar_agent_view(),
                 'accounts': [{'email': a['email'], 'label': a.get('label', ''), 'status': a['status'],
                               'services': self._services_on(a['id']),
-                              'commands': sorted(self._roots(a['id']))} for a in self.state['accounts'].values()],
+                              'commands': sorted(self._roots(a['id'])), 'via': 'own-client'} for a in self.state['accounts'].values()]
+                            + [{'email': a['email'], 'label': a.get('label', ''), 'status': a['status'], 'services': self.quick.services_on(a),
+                                'commands': [], 'via': 'composio'} for a in self.quick.section()['accounts'].values()],
                 'services': {sv: spec['label'] for sv, spec in SERVICES.items()},
+                'mail_calendar': {'contract': mailcal.CONTRACT,
+                                  'tools': self.access.visible_tools('agent:main', sorted(mailcal.TOOLS) + ['calendar_suggestions']),
+                                  'note': 'mail_* and calendar_* work on every account with Gmail/Calendar on. google_run (gog) needs an own-client account.'},
                 'app_link': '/wizard-os-home/?open=wizard-google'}
 
     # ---------- views ----------
@@ -830,7 +853,70 @@ class Broker:
                              for sv, spec in SERVICES.items()],
                 'sign_in': self._sign_in_view(),
                 'signin': self.flow_status(session) if session else {'status': 'none'},
+                'quick': self.quick.view(),
                 'audit': self.state['audit'][-30:][::-1]}
+
+    def mail_settings(self):
+        """Owner only (Mail > Settings): the accounts with how to disconnect each, and the agents' mail level."""
+        accounts = [{'id': a['id'], 'email': a['email'], 'label': a.get('label', ''), 'status': a['status'], 'via': 'own-client',
+                     'services': self._services_on(a['id']), 'disconnect': f"api/accounts/{a['id']}/disconnect"}
+                    for a in self.state['accounts'].values()]
+        accounts += [{'id': a['id'], 'email': a['email'], 'label': a.get('label', ''), 'status': a['status'], 'via': 'composio',
+                      'services': self.quick.services_on(a), 'disconnect': f"api/quick/accounts/{a['id']}/disconnect"}
+                     for a in self.quick.section()['accounts'].values()]
+        return {'source': 'google', 'accounts': accounts, 'agent_access': self.access.view()}
+
+    def calendar_settings(self):
+        """Owner only (Calendar > Settings): the same accounts and levels as mail_settings."""
+        return self.mail_settings()
+
+    def set_agent_access(self, body):
+        """Owner only: {mail: <level>} and/or {calendar: <level>} (an older Mail sends a bare mail level)."""
+        body = body if isinstance(body, dict) else {'mail': body}
+        try:
+            view = self.access.set_from(body)
+        except AccessRefused as refused:
+            raise Problem(refused.status, refused.code, refused.message) from None
+        self._record('owner', '-', 'agent_access', ','.join(f'{k}={body[k]}' for k in ('mail', 'calendar') if body.get(k)))
+        return {'agent_access': view}
+
+    # ---------- calendar suggestions (agents at Suggest only) ----------
+
+    def _suggestion_tool(self, caller, tool, args):
+        try:
+            self.access.check(caller, tool)  # approve / dismiss: the owner's tap only; listing: agents at Suggest only
+            if tool == 'calendar_suggestions':
+                return {'suggestions': self.suggestions.list(), 'level': self.access.calendar_level()}
+            item = self.suggestions.get(args.get('id'))
+        except AccessRefused as refused:
+            self._record(caller, '-', tool, refused.code)
+            raise Problem(refused.status, refused.code, refused.message) from None
+        if tool == 'calendar_suggestion_dismiss':
+            self.suggestions.drop(item['id'])
+            self._record(caller, '-', tool, 'ok')
+            return {'dismissed': True, 'id': item['id']}
+        # Approve: the owner's change, applied as the owner (the caller is the front end's grant, so no new suggestion).
+        result = self.mailcal_call(caller, item['tool'], item['args'])
+        self.suggestions.drop(item['id'])
+        self._record(caller, '-', tool, 'ok')
+        return {'approved': True, 'id': item['id'], 'result': result}
+
+    def _suggest(self, caller, tool, args, handler, account, record):
+        """An agent's calendar change at Suggest only: check it as if it ran, then keep it for the owner. Nothing changes."""
+        try:
+            handler(dry_call, args)
+        except DryRun:
+            pass
+        except BadArgs as bad:
+            raise Problem(400, 'invalid_arguments', str(bad)) from None
+        try:
+            item = self.suggestions.add(caller, tool, args, record.get('email') or account)
+        except AccessRefused as refused:
+            raise Problem(refused.status, refused.code, refused.message) from None
+        self._record(caller, account, tool, 'suggested')
+        return {'contract': mailcal.CONTRACT, 'source': 'google', 'account': record.get('email') or account,
+                'suggested': True, 'applied': False, 'suggestion': item,
+                'next': 'Nothing changed yet. The owner sees this in Calendar and approves or dismisses it.'}
 
     def _sign_in_view(self):
         mode = self._mode()
@@ -839,10 +925,8 @@ class Broker:
 
     def connection(self):
         """Read-only status in the shape of the other connection apps. Never a token."""
-        accounts = list(self.state['accounts'].values())
-        if not self.state['client']:
-            status, error = 'not_connected', {'code': 'signed_out', 'message': 'No Google account connected.'}
-        elif not accounts:
+        accounts = list(self.state['accounts'].values()) + list(self.quick.section()['accounts'].values())
+        if not accounts:
             status, error = 'not_connected', {'code': 'signed_out', 'message': 'No Google account connected.'}
         elif all(a['status'] != 'active' for a in accounts):
             status, error = 'expired', {'code': 'expired', 'message': 'Every Google account needs to be connected again.'}
@@ -851,7 +935,9 @@ class Broker:
         return {'contract': 'wizard.google-connection/1', 'provider': 'google', 'name': 'Google', 'status': status,
                 'plan': None, 'account': ', '.join(a['email'] for a in accounts if a['email']) or None, 'usage': None,
                 'accounts': [{'id': a['id'], 'email': a['email'], 'label': a.get('label', ''), 'status': a['status'],
-                              'services': self._services_on(a['id'])} for a in accounts],
+                              'via': 'composio' if a['id'].startswith('q-') else 'own-client',
+                              'services': self.quick.services_on(a) if a['id'].startswith('q-') else self._services_on(a['id'])}
+                             for a in accounts],
                 'error': error}
 
     def caller_status(self, client):
@@ -862,3 +948,86 @@ class Broker:
                              for a in self.state['accounts'].values()],
                 'operations': {op: spec['label'] for op, spec in OPERATIONS.items()},
                 'waiting': [r for r in self.state['requests'].values() if r['client'] == client and r['status'] == 'pending']}
+
+    # ---------- mail and calendar (contract wizard.mail-calendar/1; own client or Quick connect) ----------
+
+    def mail_accounts(self, service):
+        own = [(a['id'], a) for a in self.state['accounts'].values() if a['status'] == 'active' and service in self._services_on(a['id'])]
+        quick = [(a['id'], a) for a in self.quick.section()['accounts'].values() if a['status'] == 'active' and service in self.quick.services_on(a)]
+        return own + quick
+
+    def _pick_mail_account(self, value, service):
+        candidates = self.mail_accounts(service)
+        everyone = list(self.state['accounts'].values()) + list(self.quick.section()['accounts'].values())
+        if value not in (None, ''):
+            if not isinstance(value, str):
+                raise Problem(400, 'invalid_account', 'Name the account by its email or label.')
+            wanted = value.strip().lower()
+            named = [a for a in everyone if wanted in (a['id'], (a.get('email') or '').lower(), (a.get('label') or '').lower())]
+            if not named:
+                raise Problem(404, 'account_not_found', 'No connected Google account matches that.', accounts=[a['email'] for a in everyone])
+            match = next((pair for pair in candidates if pair[0] in {a['id'] for a in named}), None)
+            if not match:
+                raise Problem(403, 'service_off', f'{SERVICES[service]["label"]} is not switched on for that account. The owner can switch it on in the Google app.',
+                              app_link='/wizard-os-home/?open=wizard-google')
+            return match
+        if len(candidates) == 1:
+            return candidates[0]
+        if not candidates:
+            if not everyone:
+                raise Problem(409, 'not_connected', 'No Google account is connected yet. The owner connects one in the Google app.',
+                              app_link='/wizard-os-home/?open=wizard-google')
+            raise Problem(403, 'service_off', f'No connected Google account has {SERVICES[service]["label"]} switched on.',
+                          app_link='/wizard-os-home/?open=wizard-google')
+        raise Problem(400, 'account_required', 'Several accounts can do this; name one with "account".',
+                      accounts=[a['email'] for _, a in candidates])
+
+    def _own_call(self, account):
+        def call(method, url, query=None, body=None):
+            if query:
+                url += ('&' if '?' in url else '?') + urllib.parse.urlencode(query, doseq=True)
+            with self._account_lock(account):
+                token = self._token(account)
+            try:
+                return self.transport.request(method, url, token=token, body=body)
+            except GoogleError as failure:
+                if failure.code != 'token_rejected':
+                    raise
+                with self._account_lock(account):
+                    self._expire(account)
+                    token = self._token(account)
+                return self.transport.request(method, url, token=token, body=body)
+        return call
+
+    def mailcal_call(self, caller, tool, args):
+        """One mail/calendar tool on one account. Mail and event text in the result is untrusted data."""
+        args = args if isinstance(args, dict) else {}
+        if tool in SUGGESTION_TOOLS:
+            return self._suggestion_tool(caller, tool, args)
+        if tool not in mailcal.TOOLS:
+            raise Problem(404, 'unknown_tool', 'Unknown tool.')
+        service, writes, handler = mailcal.TOOLS[tool]
+        try:
+            action = self.access.check(caller, tool)  # agents: the owner's levels; sending is never an agent's
+        except AccessRefused as refused:
+            self._record(caller, '-', tool, refused.code)
+            raise Problem(refused.status, refused.code, refused.message) from None
+        account, record = self._pick_mail_account(args.get('account'), service)
+        if action == 'suggest':
+            return self._suggest(caller, tool, args, handler, account, record)
+        via = 'composio' if account.startswith('q-') else 'own-client'
+        try:
+            call = self.quick.caller_for(account, service) if via == 'composio' else self._own_call(account)
+            result = handler(call, args)
+        except QuickProblem as problem:
+            raise Problem(problem.status, problem.code, problem.message, **problem.extra) from None
+        except BadArgs as bad:
+            raise Problem(400, 'invalid_arguments', str(bad)) from None
+        except GoogleError as failure:
+            self._record(caller, account, tool, failure.code)
+            extra = {}
+            if failure.code == 'api_not_enabled' and via == 'own-client':
+                extra['fix_url'] = setup_flow.enable_url([failure.service or SERVICES[service]['apis'][0]], (self.state['client'] or {}).get('project_id'))
+            raise Problem(failure.status, failure.code, failure.message, **extra) from None
+        self._record(caller, account, tool, 'ok')
+        return {'contract': mailcal.CONTRACT, 'source': 'google', 'via': via, 'account': record.get('email') or account, **result}
