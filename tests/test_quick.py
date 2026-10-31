@@ -12,6 +12,7 @@ import urllib.parse
 from fakes import FakeGoogle, sign_in
 
 import broker as broker_mod
+from broker import Problem
 import composio
 import server
 
@@ -339,12 +340,45 @@ class ConnectTests(QuickBase):
         import base64
         text = base64.urlsafe_b64decode(raw + '==').decode()
         self.assertIn('In-Reply-To: <abc@example.com>', text)
-        sent = self.broker.mailcal_call('agent:main', 'mail_send', {'draft_id': draft['draft']['id']})
+        # Draft only (the default): an agent's send is refused here, whatever it says it is.
+        for caller in ('agent:main', 'agent:wizard-mail'):
+            with self.assertRaises(Problem) as refused:
+                self.broker.mailcal_call(caller, 'mail_send', {'draft_id': draft['draft']['id']})
+            self.assertEqual((refused.exception.status, refused.exception.code), (403, 'agent_send_refused'))
+        self.assertEqual(self.fake.sent, [])
+        # Mail acting for the owner (its App Manager grant, after the owner taps Send) sends the same draft.
+        sent = self.broker.mailcal_call('app:wizard-mail', 'mail_send', {'draft_id': draft['draft']['id']})
         self.assertTrue(sent['sent'])
         self.assertEqual(len(self.fake.sent), 1)
         kid = self.quick.section()['keys'][0]['id']
         self.assertGreaterEqual(self.quick.keys().public()[0]['calls_this_month'], 5)
         self.assertEqual(kid, self.quick.keys().public()[0]['id'])
+
+    def test_agent_mail_levels(self):
+        self.connect('gmail')
+        draft_args = {'to': ['anna@example.com'], 'subject': 'Hi', 'body': 'x'}
+        self.assertEqual(self.broker.access.level(), 'draft_only')
+        self.broker.set_agent_access('read_only')
+        self.broker.mailcal_call('agent:main', 'mail_search', {})
+        for tool, args in (('mail_draft', draft_args), ('mail_update', {'id': 'm1', 'read': True})):
+            with self.assertRaises(Problem) as refused:
+                self.broker.mailcal_call('agent:main', tool, args)
+            self.assertEqual(refused.exception.code, 'agent_access_denied')
+        self.broker.mailcal_call('app:wizard-mail', 'mail_draft', draft_args)  # the owner's own Mail is not limited
+        self.broker.set_agent_access('no_access')
+        with self.assertRaises(Problem) as refused:
+            self.broker.mailcal_call('agent:main', 'mail_search', {})
+        self.assertEqual(refused.exception.code, 'agent_access_denied')
+        self.assertEqual(self.broker.agent_status()['mail_access']['level'], 'no_access')
+        with self.assertRaises(Problem):
+            self.broker.set_agent_access('draft_and_send')  # agents never get a sending level
+        # A damaged file fails closed.
+        self.broker.access.path.write_text('{nope')
+        self.assertEqual(self.broker.access.level(), 'no_access')
+        self.broker.set_agent_access('draft_only')
+        self.assertEqual(oct(self.broker.access.path.stat().st_mode & 0o777), '0o600')
+        self.broker.mailcal_call('agent:main', 'mail_draft', draft_args)
+        self.assertEqual(self.fake.sent, [])
 
     def test_calendar_tools_through_composio(self):
         first = self.connect('gmail')

@@ -19,6 +19,7 @@ import mailcal
 import setup_flow
 import gogrun
 from quick import Quick, QuickProblem
+from agent_access import AgentAccess, AccessRefused
 from google import OPERATIONS, IDENTITY_SCOPES, SERVICES, GoogleError, BadArgs
 from store import Store
 
@@ -67,6 +68,8 @@ class Broker:
                  gog=None, composio_transport=None):
         self.store = Store(data_dir, store_key)
         self.state = self.store.load()
+        # The owner's choice of what agents may do with mail (Mail > Settings > Agent access). Draft only by default.
+        self.access = AgentAccess(data_dir)
         # Wizard's Google app: a stateless sign-in service holds the shared client's secret and the
         # fixed return page. Sign-ins, tokens and every Google call stay on this box.
         self.signin_service = (signin_service or '').rstrip('/')
@@ -775,16 +778,22 @@ class Broker:
         except self.gog.RunProblem as problem:
             self._record(caller, account, f'gog:{root or "?"}', problem.code)
             raise Problem(403 if problem.code == 'service_off' else 400, problem.code, problem.message) from None
+        try:
+            extra = self.access.gog_flags(caller, root)  # gmail for agents: gog itself refuses sending (and more below Draft only)
+        except AccessRefused as refused:
+            self._record(caller, account, f'gog:{root}', refused.code)
+            raise Problem(refused.status, refused.code, refused.message) from None
+        kw = {'extra': extra} if extra else {}
         # Only the token fetch holds the account lock; gog itself runs unlocked so calls can overlap.
         with self._account_lock(account):
             token = self._token(account)
         try:
-            result = self.gog.run(args, token, roots)
+            result = self.gog.run(args, token, roots, **kw)
             if result['exit_code'] == 4:  # gog: auth_required. One retry with a fresh token.
                 with self._account_lock(account):
                     self._expire(account)
                     token = self._token(account)
-                result = self.gog.run(args, token, roots)
+                result = self.gog.run(args, token, roots, **kw)
         except self.gog.RunProblem as problem:
             self._record(caller, account, f'gog:{root}', problem.code)
             raise Problem(502 if problem.code in ('gog_missing', 'timeout') else 400, problem.code, problem.message) from None
@@ -806,6 +815,7 @@ class Broker:
         return {'connected': (bool(client) and any(a['status'] == 'active' for a in self.state['accounts'].values()))
                 or any(a['status'] == 'active' for a in self.quick.section()['accounts'].values()),
                 'sign_in': (client or {}).get('mode', 'own') if client else None,
+                'mail_access': self.access.agent_view(),
                 'accounts': [{'email': a['email'], 'label': a.get('label', ''), 'status': a['status'],
                               'services': self._services_on(a['id']),
                               'commands': sorted(self._roots(a['id'])), 'via': 'own-client'} for a in self.state['accounts'].values()]
@@ -841,6 +851,24 @@ class Broker:
                 'signin': self.flow_status(session) if session else {'status': 'none'},
                 'quick': self.quick.view(),
                 'audit': self.state['audit'][-30:][::-1]}
+
+    def mail_settings(self):
+        """Owner only (Mail > Settings): the accounts with how to disconnect each, and the agents' mail level."""
+        accounts = [{'id': a['id'], 'email': a['email'], 'label': a.get('label', ''), 'status': a['status'], 'via': 'own-client',
+                     'services': self._services_on(a['id']), 'disconnect': f"api/accounts/{a['id']}/disconnect"}
+                    for a in self.state['accounts'].values()]
+        accounts += [{'id': a['id'], 'email': a['email'], 'label': a.get('label', ''), 'status': a['status'], 'via': 'composio',
+                      'services': self.quick.services_on(a), 'disconnect': f"api/quick/accounts/{a['id']}/disconnect"}
+                     for a in self.quick.section()['accounts'].values()]
+        return {'source': 'google', 'accounts': accounts, 'agent_access': self.access.view()}
+
+    def set_agent_access(self, level):
+        try:
+            view = self.access.set(level)
+        except AccessRefused as refused:
+            raise Problem(refused.status, refused.code, refused.message) from None
+        self._record('owner', '-', 'agent_access', level)
+        return {'agent_access': view}
 
     def _sign_in_view(self):
         mode = self._mode()
@@ -929,6 +957,11 @@ class Broker:
             raise Problem(404, 'unknown_tool', 'Unknown tool.')
         service, writes, handler = mailcal.TOOLS[tool]
         args = args if isinstance(args, dict) else {}
+        try:
+            self.access.check(caller, tool)  # agents: the owner's level; sending is never an agent's
+        except AccessRefused as refused:
+            self._record(caller, '-', tool, refused.code)
+            raise Problem(refused.status, refused.code, refused.message) from None
         account, record = self._pick_mail_account(args.get('account'), service)
         via = 'composio' if account.startswith('q-') else 'own-client'
         try:

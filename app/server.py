@@ -23,7 +23,7 @@ from quick import QuickProblem, valid_attempt, valid_flow  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / 'web'
 APP_ID = 'wizard-google'
-VERSION = '0.3.6'
+VERSION = '0.3.7'
 ASSETS = {'index.html', 'app.js', 'styles.css', 'boot.js', 'tokens.css', 'ui.css', 'appearance-client.js', 'sheet.js', 'icon.png', 'standalone.css', 'close.js', 'signin.js'}
 def out_origin(trusted, host, own):
     """The same box on another of its trusted ports. Wizard keeps links to its own origin inside Wizard, so the
@@ -163,7 +163,8 @@ def rpc(app, message, caller):
     if method == 'ping':
         return {'jsonrpc': '2.0', 'id': rid, 'result': {}}
     if method == 'tools/list':
-        return {'jsonrpc': '2.0', 'id': rid, 'result': {'tools': tools()}}
+        listed = app.broker.access.visible_tools(caller, [t['name'] for t in tools()])
+        return {'jsonrpc': '2.0', 'id': rid, 'result': {'tools': [t for t in tools() if t['name'] in listed]}}
     if method != 'tools/call' or not isinstance(params, dict):
         return {'jsonrpc': '2.0', 'id': rid, 'error': {'code': -32601, 'message': 'Method not found'}}
     name, args = params.get('name'), params.get('arguments') or {}
@@ -348,6 +349,11 @@ def handler_for(app):
                 pass
             elif not (config.mcp_box_only and host in config.local_hosts and not supplied):
                 raise Problem(401, 'mcp_not_box_local', 'MCP is for agents on this box.')
+            # A Wizard app acting for the owner (Mail's Send button) proves itself with its App Manager grant. Apps send it
+            # only for requests from the owner's signed-in screen; anything else here is an agent at the owner's level.
+            via_grant = app.grants.caller(self.headers.get('X-Wizard-Grant', ''))
+            if via_grant:
+                return 'app:' + via_grant
             # The Agent Service gateway names the agent it calls for; without a name it is the main agent.
             agent = (self.headers.get('X-Wizard-Agent') or 'main').strip().lower()
             if not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,62}', agent):
@@ -464,6 +470,8 @@ def handler_for(app):
                         return self.send_json(200, app.broker.flow_status(session))
                     if path == '/api/quick/status':
                         return self.send_json(200, app.broker.quick.status(session))
+                    if path == '/api/mail-settings':
+                        return self.send_json(200, app.broker.mail_settings())
                     if path == '/api/quick/flow':
                         if not valid_flow(query.get('flow')):
                             raise Problem(400, 'invalid_flow', 'Unknown sign-in.')
@@ -534,6 +542,7 @@ def handler_for(app):
                     '/api/setup/wizard': broker.use_wizard_client,
                     '/api/oauth/cancel': lambda: broker.cancel(session),
                     '/api/grants': lambda: broker.set_grant(body.get('client'), body.get('account'), body.get('operations')),
+                    '/api/agent-access': lambda: broker.set_agent_access(body.get('mail')),
                     '/api/keys': lambda: broker.create_key(body.get('client')),
                     '/api/quick/keys': lambda: broker.quick.add_key(body.get('key'), body.get('label')),
                     '/api/quick/start': lambda: broker.quick.start(session, body.get('service'), body.get('account'),
