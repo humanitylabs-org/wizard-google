@@ -64,7 +64,7 @@
   function go(next) { stack.push(next); sheetClose(); say(''); render(); view.scrollTop = 0; }
   function back() { if (!stack.length) return false; stack.pop(); render(); return true; }
   if (window.WizardApp?.version === 1) {
-    WizardApp.ready({ name: 'wizard-google', version: '0.3.7' });
+    WizardApp.ready({ name: 'wizard-google', version: '0.3.8' });
     WizardApp.back.register({ canGoBack: () => stack.length > 0, back });
   }
 
