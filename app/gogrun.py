@@ -20,7 +20,9 @@ MAX_ARG = 20_000
 
 # Global flags that would change whose token, which client or which commands gog uses.
 REFUSED_FLAGS = ('--access-token', '--home', '--client', '--account', '-a', '--enable-commands', '--enable-commands-exact',
-                 '--disable-commands', '--color', '-v', '--verbose')
+                 '--disable-commands', '--color', '-v', '--verbose',
+                 # Set by Wizard from the owner's agent access level (agent_access.py); an agent cannot turn them off.
+                 '--gmail-no-send', '--no-gmail-no-send', '--readonly', '--no-readonly')
 # Command roots that manage gog itself, not Google data.
 REFUSED_ROOTS = {'auth', 'config', 'login', 'logout', 'completion', 'agent', 'upgrade', 'update', 'version'}
 # Free-text values (a mail body may well start with "/" or mention "../"); never file paths.
@@ -71,7 +73,7 @@ def check_args(args, allowed_roots):
     return root
 
 
-def run(args, token, allowed_roots, *, timeout=TIMEOUT, binary=None):
+def run(args, token, allowed_roots, *, timeout=TIMEOUT, binary=None, extra=()):
     """Run one gog command. Returns {'exit_code', 'output' (parsed JSON or text), 'stderr', 'truncated'}."""
     root = check_args(args, allowed_roots)
     args = [root, *args[1:]]  # canonical root, so gog's own --enable-commands matches aliases too
@@ -85,7 +87,7 @@ def run(args, token, allowed_roots, *, timeout=TIMEOUT, binary=None):
         env = {'PATH': '/usr/local/bin:/usr/bin:/bin', 'HOME': home, 'GOG_HOME': home, 'GOG_ACCESS_TOKEN': token,
                'NO_COLOR': '1', 'TZ': os.getenv('TZ', 'UTC'), 'LANG': 'C.UTF-8'}
         command = [binary, '--no-input', '--color=never', '--wrap-untrusted',
-                   '--enable-commands=' + ','.join(sorted(allowed_roots))]
+                   '--enable-commands=' + ','.join(sorted(allowed_roots)), *extra]
         wants_plain = any(a in ('--plain', '-p') for a in args)
         if not wants_plain and not any(a in ('--json', '-j') for a in args):
             command.append('--json')

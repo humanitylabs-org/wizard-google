@@ -1,6 +1,9 @@
 """QA preview: the real server and UI with a labelled FAKE Google, seeded into one of three states.
 
-    python3 qa/preview.py --port 18890 --scenario fresh|paste|connected|quick|quick-connected [--core <wizard-ux>/web/core]
+    python3 qa/preview.py --port 18890 --scenario fresh|paste|connected|quick|quick-connected|composio|composio-ready [--core <wizard-ux>/web/core]
+
+composio*: Quick connect through a FAKE Composio (tests/test_quick.py). Paste ak_good_key_1234567890 to see a key accepted,
+anything else of key shape to see Composio's 401 path.
 
 Adds /__qa/host.html, a same-origin stand-in for the Wizard shell that frames the app and posts
 Appearance v1 messages (skin from ?skin=). Never use this outside local QA.
@@ -17,6 +20,7 @@ sys.path[:0] = [str(ROOT / 'app'), str(ROOT / 'tests')]
 import server  # noqa: E402
 import urllib.parse  # noqa: E402
 from fakes import CLIENT_JSON, SERVICE, FakeGog, FakeGoogle, FakeSigninService, sign_in  # noqa: E402
+from test_quick import GOOD, FakeComposio  # noqa: E402
 
 TOKENS = json.loads((Path(__file__).resolve().parent / 'skins.json').read_text())
 
@@ -41,7 +45,17 @@ def quick_sign_in(broker, google_fake, sub, email, services):
 
 def seed(app, scenario):
     broker, fake = app.broker, app.broker.transport
-    if scenario in ('fresh', 'quick'):
+    if scenario in ('fresh', 'quick', 'composio'):
+        return
+    if scenario == 'composio-ready':
+        q = broker.quick
+        q.add_key(GOOD, 'Personal')
+        for service in ('gmail', 'calendar'):
+            account = next(iter(q.section()['accounts']), None)
+            q.start('seed', service, account, None)
+            app.composio_fake.activate()
+            q.status('seed')
+        broker.mailcal_call('agent:main', 'mail_search', {'query': 'is:unread'})
         return
     if scenario == 'quick-connected':
         work = quick_sign_in(broker, fake.google, '222', 'alex@studio.example', ['gmail', 'calendar', 'drive', 'contacts'])
@@ -72,14 +86,16 @@ def seed(app, scenario):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--port', type=int, default=18890)
-    parser.add_argument('--scenario', default='connected', choices=['fresh', 'paste', 'connected', 'quick', 'quick-connected'])
+    parser.add_argument('--scenario', default='connected', choices=['fresh', 'paste', 'connected', 'quick', 'quick-connected', 'composio', 'composio-ready'])
     parser.add_argument('--core', default='', help='wizard-ux web/core folder: serves the real shared app-client.js at /wizard-os-home/core/')
     args = parser.parse_args()
     quick = args.scenario.startswith('quick')
     config = server.Config({'PORT': str(args.port), 'DATA_DIR': tempfile.mkdtemp(prefix='wizard-google-qa-'),
                             'GOOGLE_DEV_MODE': 'loopback-single-owner', 'WIZARD_SHELL_PATH': '/', 'GOOGLE_SIGNIN_SERVICE': SERVICE if quick else 'off'})
     google_fake = FakeGoogle()
-    app = server.App(config, transport=FakeSigninService(google_fake) if quick else google_fake)
+    composio_fake = FakeComposio()
+    app = server.App(config, transport=FakeSigninService(google_fake) if quick else google_fake, composio_transport=composio_fake)
+    app.composio_fake = composio_fake
     app.broker.gog = FakeGog()
     seed(app, args.scenario)
     base = server.handler_for(app)

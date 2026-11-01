@@ -178,7 +178,7 @@ class FakeGog:
 
     def run(self, args, token, roots, **kw):
         root = self.check_args(args, roots)
-        self.runs.append({'args': list(args), 'token': token, 'roots': sorted(roots)})
+        self.runs.append({'args': list(args), 'token': token, 'roots': sorted(roots), 'extra': list(kw.get('extra') or ())})
         code = self.exit_codes.pop(0) if self.exit_codes else 0
         return {'command': root, 'exit_code': code, 'output': {'ran': args, 'token_was_given': bool(token)} if code == 0 else {'error': {'code': code}},
                 'stderr': '', 'truncated': False}

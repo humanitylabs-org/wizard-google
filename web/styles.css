@@ -92,3 +92,27 @@ html[data-skin="signal"] .num { border-radius: 2px; }
 .label-form .wz-field { width: 100%; }
 .chips { padding: 8px 0 2px; }
 .wz-more .group { margin: 12px 8px 4px; }
+
+/* 0.3: Quick connect (Composio). Sentence-case titles, no uppercase eyebrows. */
+.quick-note { margin: 2px 8px 14px; padding: 12px 14px; border-radius: var(--r); background: var(--fill); color: var(--ink-2); font-size: var(--wz-text-md, .875rem); line-height: 1.5; }
+.sec-title { margin: 0; padding: 12px 8px 4px; font-size: .9375rem; font-weight: 650; color: var(--ink); }
+.sec-note { margin: 0; padding: 2px 8px 6px; font-size: var(--wz-text-sm, .8125rem); color: var(--ink-3); line-height: 1.45; }
+.key-form { display: grid; gap: 6px; padding: 8px 8px 0; }
+.key-form label { font-size: var(--wz-text-sm, .8125rem); font-weight: 650; color: var(--ink-2); }
+.key-form .wz-field { width: 100%; flex: none; }
+.key-form .hint { margin: 0; font-size: var(--wz-text-sm, .8125rem); color: var(--ink-3); }
+.key-form .hint.bad { color: var(--danger); }
+.key-form .actions { margin-top: 6px; }
+.key-row { display: flex; align-items: center; gap: 12px; min-height: 60px; padding: 8px; }
+.key-row + .key-row { border-top: 1px solid var(--line); }
+.key-row .wz-main { flex: 1; min-width: 0; display: grid; gap: 3px; }
+.key-row .wz-main b { font-size: .9375rem; font-weight: 600; overflow-wrap: anywhere; }
+.key-row .wz-main small { font-size: var(--wz-text-sm, .8125rem); color: var(--ink-3); overflow-wrap: anywhere; }
+.key-row .wz-pill { flex: none; }
+.key-row .rm[data-armed="1"] { color: var(--danger); }
+@container wz-app (max-width: 479px) {
+  .key-row { flex-wrap: wrap; }
+  .key-row .wz-main { flex-basis: calc(100% - 56px); }
+  .key-row .wz-pill { margin-left: 52px; }
+  .key-row .rm { margin-left: auto; }
+}
