@@ -46,37 +46,52 @@ class Quick:
         threading.Thread(target=self.tidy, daemon=True).start()
 
     def tidy(self):
-        """Fold Quick connect accounts that share an email into one (the newest keeps its links) and
-        ask Composio to drop the replaced sign-ins. Safe to run any time."""
+        """Fold duplicates only within one Composio key/user identity.
+
+        Save a copied state before dropping replaced sign-ins. Equal email addresses alone
+        do not authorize deleting an account belonging to a different Composio identity.
+        """
         stale = []
         try:
             with self.broker.lock:
-                accounts = self.section()['accounts']
-                by_email = {}
+                state = self.broker._copy()
+                accounts = state.get('quick', {}).get('accounts', {})
+                by_identity = {}
+                changed = False
                 for a in sorted(accounts.values(), key=lambda a: a.get('added', 0), reverse=True):
-                    email = (a.get('email') or '').lower()
-                    if not email:
+                    identity = ((a.get('email') or '').lower(), a.get('key_id'), a.get('user_id'))
+                    if not all(isinstance(part, str) and part for part in identity):
                         continue
-                    keep = by_email.setdefault(email, a)
+                    keep = by_identity.setdefault(identity, a)
                     if keep is a:
                         continue
                     for service, ca in a['links'].items():
-                        if service in keep['links'] or keep['key_id'] != a['key_id'] or keep['user_id'] != a['user_id']:
-                            stale.append((a['key_id'], ca))
+                        if service in keep['links']:
+                            if keep['links'][service] != ca:
+                                stale.append((a['key_id'], ca))
                         else:
                             keep['links'][service] = ca
                             keep['services'] = sorted(set(keep['services']) | ({service} & set(a['services'])))
                     accounts.pop(a['id'], None)
-                if stale:
-                    self.broker._commit(self.broker.state)
+                    changed = True
+                if changed:
+                    self.broker._commit(state)
         except Exception:
             return 0
-        for key_id, ca in stale:
+        removed = 0
+        for key_id, ca in dict.fromkeys(stale):
             try:
+                with self.broker.lock:
+                    # Another retained account can still refer to this same connection.
+                    current = self.broker.state.get('quick', {}).get('accounts', {})
+                    if any(a.get('key_id') == key_id and ca in a.get('links', {}).values()
+                           for a in current.values()):
+                        continue
                 self.keys().client(key_id).remove(ca, revoke=False)
+                removed += 1
             except Exception:
                 pass
-        return len(stale)
+        return removed
 
     # ---------- guided popup (Sign in to Composio if needed, then Gmail, then Calendar) ----------
     def flow_begin(self, session, services=None, account=None):
@@ -228,12 +243,12 @@ class Quick:
         return a
 
     def set_service(self, account_id, service, on):
-        a = self.account(account_id)
         if service not in TOOLKITS or not isinstance(on, bool):
             raise QuickProblem(400, 'unknown_service', 'Quick connect covers Gmail and Calendar.')
-        if on and service not in a['links']:
-            raise QuickProblem(409, 'consent_needed', f'Connect {LABELS[service]} first.', service=service, account=account_id)
         with self.broker.lock:
+            a = self.account(account_id)
+            if on and service not in a['links']:
+                raise QuickProblem(409, 'consent_needed', f'Connect {LABELS[service]} first.', service=service, account=account_id)
             services = set(a['services'])
             services.add(service) if on else services.discard(service)
             a['services'] = sorted(services)
@@ -241,10 +256,10 @@ class Quick:
         return {'account': self.account_view(a)}
 
     def set_label(self, account_id, label):
-        a = self.account(account_id)
         if not isinstance(label, str) or len(label.strip()) > 40:
             raise QuickProblem(400, 'invalid_label', 'Use a short name, like Work or Personal.')
         with self.broker.lock:
+            a = self.account(account_id)
             a['label'] = label.strip()
             self.broker._commit(self.broker.state)
         return {'account': self.account_view(a)}
@@ -269,9 +284,8 @@ class Quick:
     # ---------- calls ----------
     def _caller(self, a, service):
         """`call(method, url, query, body)` for mailcal, signed by Composio, counted per key."""
-        keys = self.keys()
         try:
-            client = keys.client(a['key_id'])
+            client = self.keys().client(a['key_id'])
         except composio.ComposioError:
             raise google.GoogleError('reauth_required', 409, 'The Composio key for this account was removed. Add it again.') from None
         ca = a['links'].get(service)
@@ -283,18 +297,19 @@ class Quick:
                 status, data = client.proxy(a['user_id'], ca, method, url, query, body)
             except composio.ComposioError as error:
                 if error.code in ('key_invalid', 'key_forbidden', 'quota'):
-                    keys.mark(a['key_id'], error.code, error.message)
+                    self.keys().mark(a['key_id'], error.code, error.message)
                 if error.code in ('not_found', 'rejected') and self._gone(client, ca):
-                    self._mark(a, 'reauth_required')
+                    self._mark(a, 'reauth_required', service, ca)
                     raise google.GoogleError('reauth_required', 409, 'Composio no longer has this sign-in. Quick connect again.') from None
                 raise google.GoogleError('provider_unavailable' if error.code == 'unavailable' else 'composio_' + error.code,
                                          error.status, error.message) from None
             finally:
-                keys.count(a['key_id'])
+                # tidy/_mark can replace the stored state while this caller is in flight.
+                self.keys().count(a['key_id'])
             if status >= 400:
                 failure = google.classify(status, data if isinstance(data, dict) else {})
                 if failure.code == 'token_rejected':
-                    self._mark(a, 'reauth_required')
+                    self._mark(a, 'reauth_required', service, ca)
                     failure = google.GoogleError('reauth_required', 409, 'Google ended this sign-in. Quick connect again.')
                 raise failure
             return data if isinstance(data, dict) else {}
@@ -306,10 +321,20 @@ class Quick:
         except composio.ComposioError as error:
             return error.code == 'not_found'
 
-    def _mark(self, a, status):
+    def _mark(self, a, status, service, connection_id):
+        # The profile lookup during sign-in uses a temporary account not yet saved by ID.
+        account_id = a.get('id')
+        if not isinstance(account_id, str) or not account_id:
+            return
         with self.broker.lock:
-            a['status'] = status
-            self.broker._commit(self.broker.state)
+            state = self.broker._copy()
+            current = state.get('quick', {}).get('accounts', {}).get(account_id)
+            if not current or any(current.get(key) != a.get(key) for key in ('key_id', 'user_id')):
+                return
+            if current.get('links', {}).get(service) != connection_id:
+                return
+            current['status'] = status
+            self.broker._commit(state)
 
     def caller_for(self, account_id, service):
         return self._caller(self.account(account_id), service)
