@@ -254,6 +254,9 @@ def _time(args, name, required):
         return None
     if isinstance(value, str) and re.fullmatch(DATE, value):
         return {'date': value}
+    if isinstance(value, str):
+        # Google answers 400 Bad Request to a time without seconds (2026-11-04T14:00): always send HH:MM:SS.
+        value = re.sub(r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})(?=$|Z$|[+-]\d{2}:\d{2}$)', r'\1:00', value)
     if isinstance(value, str) and re.fullmatch(ZONED, value):
         return {'dateTime': value, **({'timeZone': zone} if isinstance(zone, str) and zone else {})}
     if isinstance(value, str) and re.fullmatch(DATETIME, value) and isinstance(zone, str) and re.fullmatch(r'[A-Za-z_+\-/0-9]{1,64}', zone):

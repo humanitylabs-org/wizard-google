@@ -24,7 +24,7 @@ from agent_access import SUGGESTION_TOOLS, SUGGESTION_MCP_TOOLS  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / 'web'
 APP_ID = 'wizard-google'
-VERSION = '0.3.8'
+VERSION = '0.3.9'
 ASSETS = {'index.html', 'app.js', 'styles.css', 'boot.js', 'tokens.css', 'ui.css', 'appearance-client.js', 'sheet.js', 'icon.png', 'standalone.css', 'close.js', 'signin.js'}
 def out_origin(trusted, host, own):
     """The same box on another of its trusted ports. Wizard keeps links to its own origin inside Wizard, so the
