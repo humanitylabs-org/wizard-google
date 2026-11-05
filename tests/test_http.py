@@ -83,6 +83,7 @@ class LoopbackOwner(unittest.TestCase):
         config.trusted_origins = {f'http://{h}' for h in config.local_hosts}
         cls.owner = Client(cls.port)
         cls.owner.bootstrap()
+        cls.app.broker.access.set('draft_only')  # the owner picked Draft-only for the main agent (fresh installs: No access)
 
     @classmethod
     def tearDownClass(cls):
@@ -185,32 +186,38 @@ class LoopbackOwner(unittest.TestCase):
                                                              {'from': 'host:agent-service', 'sha256': hashlib.sha256(b'gateway-grant-token-123').hexdigest()}]}))
         c = Client(self.port)
         call = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call', 'params': {'name': 'mail_send', 'arguments': {'draft_id': 'd1'}}}
-        # An agent: MCP and the box-only /v1 mirror both refuse, also when it names itself after Mail or forges a grant.
-        for headers in ({}, {'X-Wizard-Agent': 'wizard-mail'}, {'X-Wizard-Grant': 'forged-grant-token-000'},
-                        {'X-Wizard-Grant': 'gateway-grant-token-123'}):
+        # With the gateway's row on the box, a call without the gateway's grant is refused before any tool runs, also
+        # when it names itself after Mail or forges a grant.
+        for headers, code in (({}, 'gateway_grant_required'), ({'X-Wizard-Agent': 'wizard-mail'}, 'gateway_grant_required'),
+                              ({'X-Wizard-Grant': 'forged-grant-token-000'}, 'grant_unknown')):
             status, value, _ = c.send('POST', '/mcp', call, headers, browser=False)
-            self.assertEqual((status, value['result']['isError'], value['result']['structuredContent']['error']['code']),
-                             (200, True, 'agent_send_refused'), headers)
+            self.assertEqual((status, value['error']['code']), (401, code), headers)
             status, value, _ = c.send('POST', '/v1/mail_send', {'draft_id': 'd1'}, headers, browser=False)
-            self.assertEqual((status, value['error']['code']), (403, 'agent_send_refused'), headers)
+            self.assertEqual((status, value['error']['code']), (401, code), headers)
+        # Through the gateway the main agent is at Draft-only: MCP and the box-only /v1 mirror both refuse the send.
+        status, value, _ = c.send('POST', '/mcp', call, {'X-Wizard-Grant': 'gateway-grant-token-123'}, browser=False)
+        self.assertEqual((status, value['result']['isError'], value['result']['structuredContent']['error']['code']),
+                         (200, True, 'agent_send_refused'))
+        status, value, _ = c.send('POST', '/v1/mail_send', {'draft_id': 'd1'}, {'X-Wizard-Grant': 'gateway-grant-token-123'}, browser=False)
+        self.assertEqual((status, value['error']['code']), (403, 'agent_send_refused'))
         # Mail with its grant (sent only for the owner's taps) passes the lock and reaches the account check.
         status, value, _ = c.send('POST', '/v1/mail_send', {'draft_id': 'd1'}, {'X-Wizard-Grant': token}, browser=False)
         self.assertNotEqual(value['error']['code'], 'agent_send_refused')
         # The level: the owner reads and sets it; agents and bearer callers cannot.
         status, value, _ = self.owner.send('GET', '/api/mail-settings')
         self.assertEqual((status, value['agent_access']['mail']), (200, 'draft_only'))
-        self.assertEqual([x['id'] for x in value['agent_access']['levels']], ['no_access', 'read_only', 'draft_only'])
+        self.assertEqual([x['id'] for x in value['agent_access']['levels']], ['no_access', 'read_only', 'draft_only', 'draft_and_send'])
         status, _, _ = c.send('POST', '/api/agent-access', {'mail': 'read_only'}, browser=False)
         self.assertIn(status, (401, 403))
         status, _, _ = self.owner.send('POST', '/api/agent-access', {'mail': 'read_only'}, {'Authorization': 'Bearer x'})
         self.assertEqual(status, 403)
         status, _, _ = self.owner.send('POST', '/api/agent-access', {'mail': 'read_only'}, {'X-CSRF-Token': 'wrong'})
         self.assertEqual(status, 403)
-        status, _, _ = self.owner.send('POST', '/api/agent-access', {'mail': 'draft_and_send'})
+        status, _, _ = self.owner.send('POST', '/api/agent-access', {'mail': 'send_everything'})
         self.assertEqual(status, 400)
         status, value, _ = self.owner.send('POST', '/api/agent-access', {'mail': 'read_only'})
         self.assertEqual((status, value['agent_access']['mail']), (200, 'read_only'))
-        status, value, _ = c.send('POST', '/v1/mail_draft', {'to': ['a@example.com'], 'body': 'x'}, browser=False)
+        status, value, _ = c.send('POST', '/v1/mail_draft', {'to': ['a@example.com'], 'body': 'x'}, {'X-Wizard-Grant': 'gateway-grant-token-123'}, browser=False)
         self.assertEqual((status, value['error']['code']), (403, 'agent_access_denied'))
         status, value, _ = self.owner.send('POST', '/api/agent-access', {'mail': 'draft_only'})
         self.assertEqual(value['agent_access']['mail'], 'draft_only')
@@ -225,16 +232,20 @@ class LoopbackOwner(unittest.TestCase):
         self.assertEqual((status, value['agent_access']['calendar'], value['agent_access']['mail']), (200, 'suggest_only', 'draft_only'))
         self.assertEqual([x['id'] for x in value['agent_access']['calendar_levels']], ['no_access', 'read_only', 'suggest_only', 'can_edit'])
         # Approve / dismiss: refused to agents on MCP and /v1, also with a forged or gateway grant; Calendar's grant passes the lock.
-        for headers in ({}, {'X-Wizard-Agent': 'wizard-calendar'}, {'X-Wizard-Grant': 'forged-grant-token-000'},
-                        {'X-Wizard-Grant': 'gateway-grant-token-123'}):
+        call = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call', 'params': {'name': 'calendar_suggestion_dismiss', 'arguments': {'id': 'sg_0000000000000000'}}}
+        for headers in ({}, {'X-Wizard-Agent': 'wizard-calendar'}, {'X-Wizard-Grant': 'forged-grant-token-000'}):
+            status, value, _ = c.send('POST', '/v1/calendar_suggestion_approve', {'id': 'sg_0000000000000000'}, headers, browser=False)
+            self.assertEqual(status, 401, headers)
+            status, value, _ = c.send('POST', '/mcp', call, headers, browser=False)
+            self.assertEqual(status, 401, headers)
+        for headers in ({'X-Wizard-Grant': 'gateway-grant-token-123'}, {'X-Wizard-Grant': token, 'X-Wizard-Agent': 'hermes'}):  # an agent, via the gateway or relayed by Calendar
             status, value, _ = c.send('POST', '/v1/calendar_suggestion_approve', {'id': 'sg_0000000000000000'}, headers, browser=False)
             self.assertEqual((status, value['error']['code']), (403, 'agent_approve_refused'), headers)
-            call = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call', 'params': {'name': 'calendar_suggestion_dismiss', 'arguments': {'id': 'sg_0000000000000000'}}}
             status, value, _ = c.send('POST', '/mcp', call, headers, browser=False)
             self.assertEqual(value['result']['structuredContent']['error']['code'], 'agent_approve_refused', headers)
         status, value, _ = c.send('POST', '/v1/calendar_suggestion_approve', {'id': 'sg_0000000000000000'}, {'X-Wizard-Grant': token}, browser=False)
         self.assertEqual((status, value['error']['code']), (404, 'suggestion_not_found'))
-        status, value, _ = c.send('POST', '/v1/calendar_suggestions', {}, browser=False)
+        status, value, _ = c.send('POST', '/v1/calendar_suggestions', {}, {'X-Wizard-Grant': 'gateway-grant-token-123'}, browser=False)
         self.assertEqual((status, value['suggestions']), (200, []))
         # Only the owner's screen sets the calendar level; the mail level stays.
         status, _, _ = c.send('POST', '/api/agent-access', {'calendar': 'can_edit'}, browser=False)
@@ -242,7 +253,7 @@ class LoopbackOwner(unittest.TestCase):
         self.assertEqual(self.owner.send('POST', '/api/agent-access', {'calendar': 'edit_everything'})[0], 400)
         status, value, _ = self.owner.send('POST', '/api/agent-access', {'calendar': 'no_access'})
         self.assertEqual((status, value['agent_access']['calendar'], value['agent_access']['mail']), (200, 'no_access', 'draft_only'))
-        status, value, _ = c.send('POST', '/v1/calendar_list_events', {}, browser=False)
+        status, value, _ = c.send('POST', '/v1/calendar_list_events', {}, {'X-Wizard-Grant': 'gateway-grant-token-123'}, browser=False)
         self.assertEqual((status, value['error']['code']), (403, 'agent_access_denied'))
         status, value, _ = self.owner.send('POST', '/api/agent-access', {'calendar': 'suggest_only'})
         self.assertEqual(value['agent_access']['calendar'], 'suggest_only')
