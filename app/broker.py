@@ -19,7 +19,7 @@ import mailcal
 import setup_flow
 import gogrun
 from quick import Quick, QuickProblem
-from agent_access import AgentAccess, AccessRefused, Suggestions, SUGGESTION_TOOLS, DryRun, dry_call
+from agent_access import AgentAccess, AccessRefused, is_agent, Suggestions, SUGGESTION_TOOLS, DryRun, dry_call
 from google import OPERATIONS, IDENTITY_SCOPES, SERVICES, GoogleError, BadArgs
 from store import Store
 
@@ -68,7 +68,7 @@ class Broker:
                  gog=None, composio_transport=None):
         self.store = Store(data_dir, store_key)
         self.state = self.store.load()
-        # The owner's choice of what agents may do with mail (Mail > Settings > Agent access). Draft only by default.
+        # The owner's choice of what each agent may do with mail (Mail > Settings > Agent access).
         self.access = AgentAccess(data_dir)
         # Calendar changes agents suggested at Suggest only, waiting for the owner's Approve / Dismiss in Calendar.
         self.suggestions = Suggestions(data_dir)
@@ -86,6 +86,9 @@ class Broker:
         self.flows = {}  # sha(state) -> pending sign-in; memory only, 10 minutes
         # Quick connect (Composio): Gmail and Calendar without a Google Cloud project.
         self.quick = Quick(self, transport=composio_transport, clock=clock)
+        # Per-agent mail levels: an update keeps the level every agent had for the main agent; a fresh install starts
+        # every agent, the main one included, at No access until the owner picks.
+        self.access.migrate(bool(self.state.get('client') or self.state.get('accounts') or self.quick.section().get('accounts')))
 
     # ---------- state ----------
 
@@ -811,14 +814,15 @@ class Broker:
         except self.gog.RunProblem as problem:
             raise Problem(400, problem.code, problem.message) from None
 
-    def agent_status(self):
-        """What the owner's agents can use. Never a token."""
+    def agent_status(self, caller='agent:main'):
+        """What this agent can use (its own mail level). Never a token. `per_agent_callers`: Mail and Calendar may
+        relay a gateway-verified agent with their grant plus X-Wizard-Agent (agent_access.resolve_caller)."""
         client = self.state.get('client')
         return {'connected': (bool(client) and any(a['status'] == 'active' for a in self.state['accounts'].values()))
                 or any(a['status'] == 'active' for a in self.quick.section()['accounts'].values()),
                 'sign_in': (client or {}).get('mode', 'own') if client else None,
-                'mail_access': self.access.agent_view(),
-                'calendar_access': self.access.calendar_agent_view(),
+                'mail_access': self.access.agent_view(caller if is_agent(caller) else 'agent:main'),
+                'calendar_access': self.access.calendar_agent_view(), 'per_agent_callers': True,
                 'accounts': [{'email': a['email'], 'label': a.get('label', ''), 'status': a['status'],
                               'services': self._services_on(a['id']),
                               'commands': sorted(self._roots(a['id'])), 'via': 'own-client'} for a in self.state['accounts'].values()]
@@ -826,7 +830,7 @@ class Broker:
                                 'commands': [], 'via': 'composio'} for a in self.quick.section()['accounts'].values()],
                 'services': {sv: spec['label'] for sv, spec in SERVICES.items()},
                 'mail_calendar': {'contract': mailcal.CONTRACT,
-                                  'tools': self.access.visible_tools('agent:main', sorted(mailcal.TOOLS) + ['calendar_suggestions']),
+                                  'tools': self.access.visible_tools(caller, sorted(mailcal.TOOLS) + ['calendar_suggestions']),
                                   'note': 'mail_* and calendar_* work on every account with Gmail/Calendar on. google_run (gog) needs an own-client account.'},
                 'app_link': '/wizard-os-home/?open=wizard-google'}
 

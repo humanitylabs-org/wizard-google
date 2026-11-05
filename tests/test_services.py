@@ -31,6 +31,7 @@ class WizardSignIn(unittest.TestCase):
         self.service = FakeSigninService(self.google)
         self.gog = FakeGog()
         self.broker = Broker(self.dir, transport=self.service, signin_service=SERVICE, gog=self.gog)
+        self.broker.access.set('draft_only')  # the owner picked Draft-only for the main agent (fresh installs start at No access)
 
     def tearDown(self):
         shutil.rmtree(self.dir, ignore_errors=True)
