@@ -24,7 +24,7 @@ from agent_access import SUGGESTION_TOOLS, SUGGESTION_MCP_TOOLS  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / 'web'
 APP_ID = 'wizard-google'
-VERSION = '0.3.9'
+VERSION = '0.4.0'
 ASSETS = {'index.html', 'app.js', 'styles.css', 'boot.js', 'tokens.css', 'ui.css', 'appearance-client.js', 'sheet.js', 'icon.png', 'standalone.css', 'close.js', 'signin.js'}
 def out_origin(trusted, host, own):
     """The same box on another of its trusted ports. Wizard keeps links to its own origin inside Wizard, so the
@@ -37,6 +37,7 @@ DEFAULT_SIGNIN_SERVICE = 'https://www.aiwizards.com/wizard-google/auth'
 FORWARDING = ('X-Forwarded-For', 'X-Forwarded-Host', 'Forwarded', 'X-Real-IP')
 SESSION_TTL = 8 * 3600
 MAX_BODY = 64_000
+MAX_MAIL_BODY = 26_000_000  # mail_draft with attachments (18 MB of files as base64 + JSON)
 
 
 def csv_env(name):
@@ -375,14 +376,16 @@ def handler_for(app):
                     return client
             raise Problem(401, 'caller_unknown', 'Send X-Wizard-Grant, or an access key the owner created in the Google app.')
 
-        def body(self):
+        def body(self, limit=MAX_BODY):
             if (self.headers.get('Content-Type') or '').split(';')[0].strip().lower() != 'application/json':
                 raise Problem(415, 'content_type', 'Use application/json.')
             try:
                 length = int(self.headers.get('Content-Length', ''))
             except ValueError:
                 raise Problem(400, 'invalid_length', 'Invalid Content-Length.') from None
-            if not 1 <= length <= MAX_BODY:
+            if length > limit and limit == MAX_MAIL_BODY:
+                raise Problem(413, 'body_size', 'Too big: attachments can be at most 18 MB together.')
+            if not 1 <= length <= limit:
                 raise Problem(413, 'body_size', 'Request body is empty or too large.')
             try:
                 value = json.loads(self.rfile.read(length))
@@ -506,7 +509,7 @@ def handler_for(app):
                 if path == '/mcp':
                     caller = self.mcp_caller()
                     self.host()
-                    output = rpc(app, self.body(), caller)
+                    output = rpc(app, self.body(MAX_MAIL_BODY), caller)
                     return self.send_json(202 if output is None else 200, output or {})
                 local = re.fullmatch(r'/v1/([a-z_]{3,40})', path)
                 if local:
@@ -515,7 +518,8 @@ def handler_for(app):
                     self.host()
                     if local.group(1) not in mailcal.TOOLS and local.group(1) not in SUGGESTION_TOOLS:
                         raise Problem(404, 'not_found', 'Not found.')
-                    return self.send_json(200, app.broker.mailcal_call(caller, local.group(1), self.body()))
+                    limit = MAX_MAIL_BODY if local.group(1) == 'mail_draft' else MAX_BODY
+                    return self.send_json(200, app.broker.mailcal_call(caller, local.group(1), self.body(limit)))
                 if path.startswith('/consumer/v1/'):
                     caller = self.consumer_caller()
                     body = self.body()

@@ -21,7 +21,7 @@ DRIVE = 'https://www.googleapis.com/drive/v3'
 PEOPLE = 'https://people.googleapis.com/v1'
 YOUTUBE = 'https://www.googleapis.com/youtube/v3'
 ALLOWED_HOSTS = {'oauth2.googleapis.com', 'gmail.googleapis.com', 'www.googleapis.com', 'people.googleapis.com'}
-MAX_RESPONSE = 4_000_000
+MAX_RESPONSE = 40_000_000  # a mail attachment (base64) can be ~34 MB; everything else is far smaller
 MAX_TEXT = 100_000
 
 IDENTITY_SCOPES = ('openid', 'email', 'profile')
@@ -188,8 +188,10 @@ class Transport:
             data = json.dumps(body).encode()
             headers['Content-Type'] = 'application/json'
         request = urllib.request.Request(url, data=data, method=method, headers=headers)
+        # Big mail attachments (uploads and attachment downloads) need longer than an ordinary call.
+        slow = (data is not None and len(data) > 1_000_000) or '/attachments/' in parts.path
         try:
-            with self.opener.open(request, timeout=20) as response:
+            with self.opener.open(request, timeout=120 if slow else 20) as response:
                 content = response.read(MAX_RESPONSE + 1)
                 kind = response.headers.get('Content-Type', '')
         except urllib.error.HTTPError as error:
@@ -285,7 +287,7 @@ def _body_text(part, budget=MAX_TEXT):
     def walk(node):
         mime = node.get('mimeType', '')
         data = node.get('body', {}).get('data')
-        if data and mime in ('text/plain', 'text/html'):
+        if data and mime in ('text/plain', 'text/html') and not node.get('filename'):  # a .txt attachment is not the body
             try:
                 decoded = base64.urlsafe_b64decode(data + '=' * (-len(data) % 4)).decode('utf-8', 'replace')
             except ValueError:

@@ -21,6 +21,9 @@ These work on every account with Gmail/Calendar on, however it was connected. Pr
 | Unread mail | `mail_search` `{"unread_only": true}` (add `"query"` with Gmail search words) |
 | Read one message | `mail_get` `{"id": "<id>"}` |
 | Draft a reply / new mail | `mail_draft` `{"reply_to_id": "<id>", "body": "…"}` or `{"to": ["a@b.com"], "subject": "…", "body": "…"}` |
+| Attach files | `mail_draft` `… "attachments": [{"name": "plan.pdf", "mime": "application/pdf", "base64": "…"}]` (10 files, 18 MB together) |
+| Change a draft in place | `mail_draft` `{"draft_id": "<draft_id from mail_get>", …changed fields}`: its files stay unless named in `remove_attachments` |
+| Forward with files | `mail_draft` `{"to": [...], "subject": "Fwd: …", "body": "…", "attachments_from": "<message id>"}` |
 | Send | You can't: `mail_send` refuses agents. Tell the owner the draft waits in Mail (Drafts); he sends it there. |
 | Events in a range | `calendar_list_events` `{"time_min": "2026-11-02T00:00:00+07:00", "time_max": "2026-11-09T00:00:00+07:00"}` |
 | Add / change / delete / answer (after OK) | `calendar_create_event`, `calendar_update_event`, `calendar_delete_event`, `calendar_respond` |

@@ -212,6 +212,12 @@ class LoopbackOwner(unittest.TestCase):
         self.assertEqual((status, value['agent_access']['mail']), (200, 'read_only'))
         status, value, _ = c.send('POST', '/v1/mail_draft', {'to': ['a@example.com'], 'body': 'x'}, browser=False)
         self.assertEqual((status, value['error']['code']), (403, 'agent_access_denied'))
+        # A draft with a file is far over the ordinary body cap; it still reaches the tool (and its access check).
+        big = {'to': ['a@example.com'], 'body': 'x', 'attachments': [{'name': 'a.pdf', 'base64': 'QUFB' * 100_000}]}
+        status, value, _ = c.send('POST', '/v1/mail_draft', big, browser=False)
+        self.assertEqual((status, value['error']['code']), (403, 'agent_access_denied'))
+        status, value, _ = c.send('POST', '/v1/mail_search', {'query': 'x' * 70_000}, browser=False)
+        self.assertEqual((status, value['error']['code']), (413, 'body_size'))
         status, value, _ = self.owner.send('POST', '/api/agent-access', {'mail': 'draft_only'})
         self.assertEqual(value['agent_access']['mail'], 'draft_only')
         self.grants_file.write_text('{}')
