@@ -17,9 +17,10 @@ whichever way an account is connected: Google with the owner's own client, Googl
 
 | Tool | Arguments | Result |
 |---|---|---|
-| `mail_search` | `account?`, `query?`, `folder?`, `unread_only?`, `max?` (1–25), `page_token?` | `folder`, `messages[]` (summary), `next_page_token`, `untrusted` |
+| `mail_search` | `account?`, `query?`, `folder?`, `unread_only?`, `ids_only?`, `max?` (1–25; 1–500 with `ids_only`), `page_token?` | `folder`, `messages[]` (summary) or with `ids_only` `ids[]`, `next_page_token`, `untrusted` |
 | `mail_get` | `account?`, `id`, `format?` (`text` \| `html`) | `message` (summary + `body_text`, `truncated`, `attachments[]` {`name`, `mime`, `size`}, `message_id_header`, `draft_id` on a draft; `body_html` with `format: html`), `untrusted` |
 | `mail_update` | `account?`, `id`, any of `read`, `archived`, `trashed` (booleans) | `updated`, `id` (Microsoft moves give a new id), `unread`, `archived`, `trashed` |
+| `mail_update_bulk` | `account?`, `ids[]` (1–1000), any of `read`, `archived` (booleans) | `updated`, `count`, `ids`, `unread` / `archived` as set |
 | `mail_draft` | `account?`, `body?`, `to[]`, `cc[]`, `bcc[]`, `subject`, `reply_to_id?`, `attachments[]?` {`name`, `mime?`, `base64`}, `draft_id?`, `remove_attachments[]?`, `attachments_from?` | `draft` {`id`, `message_id`, `thread_id`, `to`, `cc`, `subject`, `body_text`, `attachments[]` {`name`, `mime`, `size`}}, `updated`, `sent: false` |
 | `mail_send` | `account?`, `draft_id` | `sent: true`, `id`, `thread_id` |
 | `calendar_list_events` | `account?`, `calendar_id?`, `time_min?`, `time_max?`, `query?`, `max?`, `page_token?` | `events[]`, `next_page_token`, `untrusted` |
@@ -45,6 +46,15 @@ Additions in 1.2 (draft attachments, backward compatible):
 - The whole draft (kept + copied + new files) stays under 18 MB. Microsoft: each new file at most 3 MB (Graph's
   simple attachment upload).
 - Agents keep their level: Draft only may attach and edit drafts; sending stays the owner's.
+
+Additions in 1.3 (bulk changes, backward compatible):
+- `mail_search` `ids_only: true`: only the message ids of one page (`ids[]`, up to 500 with `max`), with no per-message
+  fetch (Gmail `messages.list`). For bulk changes such as Mark all as read.
+- `mail_update_bulk`: mark up to 1000 messages read/unread or archived/unarchived in one call (Gmail
+  `messages.batchModify`). It never trashes or deletes. Same agent level as `mail_update` (Draft only). Repeated ids
+  count once. A source without a bulk API may loop per message but answers in the same shape. Microsoft (Graph
+  `$batch`, 20 per request) follows.
+- Mail apps use them when the source lists `mail_update_bulk`, and fall back to per-message `mail_update` otherwise.
 
 Message summary: `id`, `thread_id`, `from` {name, email}, `to[]`, `cc[]`, `subject`, `date` (ISO 8601), `snippet`,
 `unread`, `labels[]`.
@@ -90,7 +100,7 @@ works too.
   is annotated `destructiveHint` and its description starts with SENDS MAIL.
 - Agent access (`app/agent_access.py`, the same file in every source): the owner's level for agents' mail, kept in
   `DATA_DIR/agent-access.json` and enforced by the source for every MCP and `/v1` call: `no_access`, `read_only`
-  (`mail_search`, `mail_get`), `draft_only` (+ `mail_draft`, `mail_update`; the default). Agents never send:
+  (`mail_search`, `mail_get`), `draft_only` (+ `mail_draft`, `mail_update`, `mail_update_bulk`; the default). Agents never send:
   `mail_send` is refused (`agent_send_refused`) and not listed to them. A Wizard app proves it acts for the owner by
   sending its App Manager grant in `X-Wizard-Grant` (looked up in `$WIZARD_GRANTS_FILE` `incoming`); front ends send it
   only for requests from the owner's signed-in screen (Mail's Send button) and never for their own agent tools.

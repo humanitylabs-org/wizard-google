@@ -175,7 +175,7 @@ class LoopbackOwner(unittest.TestCase):
         status, value, _ = c.send('POST', '/mcp', {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'}, browser=False)
         names = {t['name'] for t in value['result']['tools']}
         # Agents never see mail_send (Draft only is the highest agent level; the owner sends from Mail).
-        self.assertEqual(names, {'google_status', 'google_run', 'google_help', 'mail_search', 'mail_get', 'mail_draft', 'mail_update',
+        self.assertEqual(names, {'google_status', 'google_run', 'google_help', 'mail_search', 'mail_get', 'mail_draft', 'mail_update', 'mail_update_bulk',
                                  'calendar_list_events', 'calendar_create_event', 'calendar_update_event', 'calendar_delete_event',
                                  'calendar_respond', 'calendar_suggestions'})
 

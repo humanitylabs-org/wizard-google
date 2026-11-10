@@ -4,7 +4,7 @@ id: wizard-google
 name: Google
 type: external
 category: system
-version: 0.4.0
+version: 0.4.1
 summary: Connect Google and choose what your agent may use. Quick connect (Gmail, Calendar) via Composio, or your own Google client.
 license: MIT
 source: https://github.com/humanitylabs-org/wizard-google
@@ -44,4 +44,4 @@ Connect Gmail, Calendar, Drive (with Docs and Sheets), Contacts and YouTube to y
 - **Apps** (other Wizard apps) use typed operations at `/consumer/v1` with their Wizard grant or an access key, per account and operation, as before.
 - **Moves with the box.** Sign-ins, the store key and every switch live in this app's data folder (`${APP_DATA_DIR}/data`), so a backup restored on a new box needs no reconnect. Stop the old box before starting the new one.
 
-MCP at `/mcp` for agents on this box: `google_status`, `google_run`, `google_help`, and mail/calendar tools that work for every account however it was connected: `mail_search`, `mail_get`, `mail_draft` (with attachments; edits a draft in place and keeps its files), `mail_send` (sends an approved draft), `mail_update` (read/archive/trash), `calendar_list_events`, `calendar_create_event`, `calendar_update_event`, `calendar_delete_event`, `calendar_respond` (contract `wizard.mail-calendar/1`, shared with the Microsoft app; the same tools over HTTP at `/v1/<tool>` for scripts and apps on this box; Mail and Calendar run Quick connect from their own window). Read-only status for the shell at `/api/connection` (`wizard.google-connection/1`).
+MCP at `/mcp` for agents on this box: `google_status`, `google_run`, `google_help`, and mail/calendar tools that work for every account however it was connected: `mail_search`, `mail_get`, `mail_draft` (with attachments; edits a draft in place and keeps its files), `mail_send` (sends an approved draft), `mail_update` (read/archive/trash), `mail_update_bulk` (mark up to 1000 read or archived in one call; with `mail_search` `ids_only`), `calendar_list_events`, `calendar_create_event`, `calendar_update_event`, `calendar_delete_event`, `calendar_respond` (contract `wizard.mail-calendar/1`, shared with the Microsoft app; the same tools over HTTP at `/v1/<tool>` for scripts and apps on this box; Mail and Calendar run Quick connect from their own window). Read-only status for the shell at `/api/connection` (`wizard.google-connection/1`).

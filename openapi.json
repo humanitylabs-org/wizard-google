@@ -234,10 +234,15 @@
           "type": "boolean",
           "description": "Only unread messages."
          },
+         "ids_only": {
+          "type": "boolean",
+          "description": "Return only message ids (ids[]), up to 500 per page, without fetching each message: use with mail_update_bulk."
+         },
          "max": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 25
+          "maximum": 500,
+          "description": "At most 25, or 500 with ids_only."
          },
          "page_token": {
           "type": "string"
@@ -701,6 +706,53 @@
           "type": "boolean"
          },
          "trashed": {
+          "type": "boolean"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Result in contract wizard.mail-calendar/1 (docs/mail-calendar-contract.md)"
+     },
+     "4XX": {
+      "description": "{error:{code,message}}"
+     }
+    }
+   }
+  },
+  "/v1/mail_update_bulk": {
+   "post": {
+    "summary": "Box-only mirror of the MCP tool. Mark up to 1000 messages read or unread, or archive them (or back), in one call. Nothing is deleted or trashed. Get the ids with mail_search ids_only. Ask the owner before archiving.",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "ids"
+        ],
+        "properties": {
+         "account": {
+          "type": "string",
+          "description": "Email or label (e.g. \"work\") of the account. Optional when only one account has this on."
+         },
+         "ids": {
+          "type": "array",
+          "items": {
+           "type": "string"
+          },
+          "minItems": 1,
+          "maxItems": 1000,
+          "description": "Message ids from mail_search."
+         },
+         "read": {
+          "type": "boolean"
+         },
+         "archived": {
           "type": "boolean"
          }
         }

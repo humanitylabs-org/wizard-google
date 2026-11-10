@@ -38,7 +38,8 @@ WHAT = {'no_access': 'Agents can\'t read your mail.',
         'draft_only': 'Agents read, sort and write drafts. Only you send, from Mail.'}
 RANK = {level: n for n, level in enumerate(LEVELS)}
 # What each mail tool needs. None: agents never get it (sending is the owner's tap in Mail).
-MAIL_TOOLS = {'mail_search': 'read_only', 'mail_get': 'read_only', 'mail_update': 'draft_only', 'mail_draft': 'draft_only',
+MAIL_TOOLS = {'mail_search': 'read_only', 'mail_get': 'read_only', 'mail_update': 'draft_only', 'mail_update_bulk': 'draft_only',
+              'mail_draft': 'draft_only',
               'mail_send': None}
 
 CAL_LEVELS = ('no_access', 'read_only', 'suggest_only', 'can_edit')
