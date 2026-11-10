@@ -207,6 +207,7 @@ class QuickBase(unittest.TestCase):
         self.google = FakeGoogle()
         self.clock = Clock()
         self.broker = broker_mod.Broker(self.dir, transport=self.google, composio_transport=self.fake, clock=self.clock)
+        self.broker.access.set('draft_only')  # the owner picked Draft-only for the main agent (fresh installs start at No access)
         self.quick = self.broker.quick
 
     def tearDown(self):
@@ -340,11 +341,11 @@ class ConnectTests(QuickBase):
         import base64
         text = base64.urlsafe_b64decode(raw + '==').decode()
         self.assertIn('In-Reply-To: <abc@example.com>', text)
-        # Draft only (the default): an agent's send is refused here, whatever it says it is.
-        for caller in ('agent:main', 'agent:wizard-mail'):
+        # Draft-only: the main agent's send is refused; an agent the owner never picked a level for has No access.
+        for caller, code in (('agent:main', 'agent_send_refused'), ('agent:wizard-mail', 'agent_access_off')):
             with self.assertRaises(Problem) as refused:
                 self.broker.mailcal_call(caller, 'mail_send', {'draft_id': draft['draft']['id']})
-            self.assertEqual((refused.exception.status, refused.exception.code), (403, 'agent_send_refused'))
+            self.assertEqual((refused.exception.status, refused.exception.code), (403, code))
         self.assertEqual(self.fake.sent, [])
         # Mail acting for the owner (its App Manager grant, after the owner taps Send) sends the same draft.
         sent = self.broker.mailcal_call('app:wizard-mail', 'mail_send', {'draft_id': draft['draft']['id']})
@@ -368,10 +369,10 @@ class ConnectTests(QuickBase):
         self.broker.set_agent_access('no_access')
         with self.assertRaises(Problem) as refused:
             self.broker.mailcal_call('agent:main', 'mail_search', {})
-        self.assertEqual(refused.exception.code, 'agent_access_denied')
+        self.assertEqual(refused.exception.code, 'agent_access_off')
         self.assertEqual(self.broker.agent_status()['mail_access']['level'], 'no_access')
         with self.assertRaises(Problem):
-            self.broker.set_agent_access('draft_and_send')  # agents never get a sending level
+            self.broker.set_agent_access('send_everything')
         # A damaged file fails closed.
         self.broker.access.path.write_text('{nope')
         self.assertEqual(self.broker.access.level(), 'no_access')
@@ -639,6 +640,7 @@ class OwnClientMailTests(unittest.TestCase):
         try:
             fake = FakeGoogle()
             b = broker_mod.Broker(directory, transport=fake)
+            b.access.set('draft_only')
             from fakes import CLIENT_JSON
             b.save_client(CLIENT_JSON, redirect_uri='http://127.0.0.1:18812/oauth/callback')
             result, _ = sign_in(b, fake, 'sess', 'sub-1', 'own@example.com')

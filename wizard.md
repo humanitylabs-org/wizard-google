@@ -22,6 +22,9 @@ mcp:
   path: /mcp
   port: 18812
   transport: streamable-http
+  # The App Manager writes the Agent Service gateway's host:agent-service row (wizard-os spec/PERMISSIONS.md layer 2):
+  # this app tells the gateway, and the agent it names, from any other caller by it.
+  checks_gateway: true
 skill: skill/SKILL.md
 view:
   path: /

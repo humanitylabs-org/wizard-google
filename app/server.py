@@ -19,7 +19,7 @@ from broker import Broker, Problem  # noqa: E402
 from google import OPERATIONS, SERVICES  # noqa: E402
 import mailcal  # noqa: E402
 from quick import QuickProblem, valid_attempt, valid_flow  # noqa: E402
-from agent_access import SUGGESTION_TOOLS, SUGGESTION_MCP_TOOLS  # noqa: E402
+from agent_access import SUGGESTION_TOOLS, SUGGESTION_MCP_TOOLS, AccessRefused, GatewayGrant, resolve_caller  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / 'web'
@@ -175,7 +175,7 @@ def rpc(app, message, caller):
             raise Problem(400, 'invalid_arguments', 'Arguments must be an object.')
         broker = app.broker
         if name == 'google_status':
-            value = broker.agent_status()
+            value = broker.agent_status(caller)
         elif name == 'google_run':
             value = broker.run_gog(caller, args.get('args'), args.get('account'))
         elif name == 'google_help':
@@ -199,6 +199,8 @@ class App:
                                        signin_service=config.signin_service, composio_transport=composio_transport)
         self.sessions = Sessions()
         self.grants = WizardGrants(config.grants_file)
+        # The Agent Service gateway's grant (`from: host:agent-service` in the same file): the only proof of which agent calls.
+        self.gateway = GatewayGrant(config.grants_file)
         self.origins = []
 
     def origin_for(self, host):
@@ -348,19 +350,15 @@ def handler_for(app):
             host = (self.headers.get('Host') or '').lower()
             supplied = self.headers.get('Authorization', '')
             if config.admin_token and supplied and hmac.compare_digest(supplied, 'Bearer ' + config.admin_token):
-                pass
-            elif not (config.mcp_box_only and host in config.local_hosts and not supplied):
+                return 'agent:main'  # the owner's own MCP secret: the main agent's level, never a claimed name
+            if not (config.mcp_box_only and host in config.local_hosts and not supplied):
                 raise Problem(401, 'mcp_not_box_local', 'MCP is for agents on this box.')
-            # A Wizard app acting for the owner (Mail's Send button) proves itself with its App Manager grant. Apps send it
-            # only for requests from the owner's signed-in screen; anything else here is an agent at the owner's level.
-            via_grant = app.grants.caller(self.headers.get('X-Wizard-Grant', ''))
-            if via_grant:
-                return 'app:' + via_grant
-            # The Agent Service gateway names the agent it calls for; without a name it is the main agent.
-            agent = (self.headers.get('X-Wizard-Agent') or 'main').strip().lower()
-            if not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,62}', agent):
-                raise Problem(400, 'invalid_agent', 'Invalid agent name.')
-            return 'agent:' + agent
+            # Who is calling comes from a grant, never from a name the caller gives (agent_access.resolve_caller): the
+            # gateway's grant names the agent; Mail's / Calendar's grant alone is the owner's tap in that app.
+            try:
+                return resolve_caller(self.headers, app.grants, app.gateway, app.broker.access)
+            except AccessRefused as refused:
+                raise Problem(refused.status, refused.code, refused.message) from None
 
         def consumer_caller(self):
             if self.headers.get('Cookie') or self.headers.get('Origin'):
@@ -455,9 +453,9 @@ def handler_for(app):
                         return self.send_done('Connected', f'{who} is connected. This window closes by itself.', True)
                     return self.send_done('Not connected', (view.get('error') or {}).get('message') or 'Start again from Wizard.', True)
                 if path == '/v1/status':
-                    self.mcp_caller()
+                    caller = self.mcp_caller()
                     self.host()
-                    return self.send_json(200, app.broker.agent_status())
+                    return self.send_json(200, app.broker.agent_status(caller))
                 if path.startswith('/consumer/v1/'):
                     caller = self.consumer_caller()
                     if path == '/consumer/v1/status':
