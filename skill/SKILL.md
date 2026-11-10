@@ -19,6 +19,7 @@ These work on every account with Gmail/Calendar on, however it was connected. Pr
 | Job | Tool and arguments |
 |---|---|
 | Unread mail | `mail_search` `{"unread_only": true}` (add `"query"` with Gmail search words) |
+| Mark many read / archive many | `mail_search` `{"unread_only": true, "ids_only": true, "max": 500}` (ids only, follow `next_page_token`), then `mail_update_bulk` `{"ids": [...], "read": true}` (up to 1000 per call; ask before archiving) |
 | Read one message | `mail_get` `{"id": "<id>"}` |
 | Draft a reply / new mail | `mail_draft` `{"reply_to_id": "<id>", "body": "…"}` or `{"to": ["a@b.com"], "subject": "…", "body": "…"}` |
 | Attach files | `mail_draft` `… "attachments": [{"name": "plan.pdf", "mime": "application/pdf", "base64": "…"}]` (10 files, 18 MB together) |

@@ -38,7 +38,7 @@ class FakeComposio:
         self.cli = {}            # CLI sign-in sessions: id -> 'pending' | 'linked'
         self.info_key = None     # project key carried by session/info (None: the app mints one)
         self.minted = []
-        self.labels, self.queries = {}, []
+        self.labels, self.queries, self.batches = {}, [], []
 
     def link_signin(self):
         self.cli[max(self.cli)] = 'linked'
@@ -131,6 +131,13 @@ class FakeComposio:
         if p == '/gmail/v1/users/me/messages':
             self.queries.append(query)
             return 200, {'messages': [{'id': k} for k in self.mail]}
+        if p == '/gmail/v1/users/me/messages/batchModify' and method == 'POST':
+            self.batches.append(body)
+            assert len(body['ids']) <= 1000
+            for mid in body['ids']:
+                labels = self.labels.setdefault(mid, ['INBOX', 'UNREAD'])
+                labels[:] = [x for x in labels if x not in body['removeLabelIds']] + [x for x in body['addLabelIds'] if x not in labels]
+            return 204, None
         action = re.fullmatch(r'/gmail/v1/users/me/messages/([a-z0-9]+)/(modify|trash|untrash)', p)
         if action and method == 'POST':
             mid, verb = action.groups()
@@ -521,6 +528,47 @@ class ConnectTests(QuickBase):
             self.broker.mailcal_call('agent:main', 'mail_update', {'id': 'm1', 'read': 'yes'})
         self.assertEqual(caught.exception.code, 'invalid_arguments')
         self.assertIn('mail_update', [t['name'] for t in server.tools()])
+
+
+    def test_mark_all_read_in_a_few_calls(self):
+        """Issue 14: 500 unread messages are marked read with one ids-only search and one batchModify."""
+        self.connect('gmail')
+        self.fake.mail.update({f'n{i}': dict(self.fake.mail['m1']) for i in range(499)})
+        proxied = lambda: sum(1 for c in self.fake.calls if c[1] == '/tools/execute/proxy')
+        before = proxied()
+        found = self.broker.mailcal_call('agent:main', 'mail_search', {'folder': 'inbox', 'unread_only': True, 'ids_only': True, 'max': 500})
+        self.assertEqual(len(found['ids']), 500)
+        self.assertNotIn('messages', found)
+        self.assertEqual((self.fake.queries[-1]['q'], self.fake.queries[-1]['maxResults']), ('in:inbox is:unread', '500'))
+        done = self.broker.mailcal_call('agent:main', 'mail_update_bulk', {'ids': found['ids'], 'read': True})
+        self.assertEqual((done['updated'], done['count'], done['unread'], done['via']), (True, 500, False, 'composio'))
+        self.assertEqual(proxied() - before, 2)  # was ~1,500 (a metadata GET per message, then modify + GET per message)
+        self.assertEqual(self.fake.batches, [{'ids': found['ids'], 'addLabelIds': [], 'removeLabelIds': ['UNREAD']}])
+        self.assertTrue(all('UNREAD' not in self.fake.labels[mid] for mid in found['ids']))
+        archived = self.broker.mailcal_call('agent:main', 'mail_update_bulk', {'ids': ['m1', 'm1'], 'archived': True, 'read': False})
+        self.assertEqual((archived['count'], archived['archived'], archived['unread']), (1, True, True))
+        self.assertEqual(self.fake.batches[-1], {'ids': ['m1'], 'addLabelIds': ['UNREAD'], 'removeLabelIds': ['INBOX']})
+        # The per-message search still caps at 25 and still returns summaries.
+        with self.assertRaises(Problem) as caught:
+            self.broker.mailcal_call('agent:main', 'mail_search', {'max': 26})
+        self.assertEqual(caught.exception.code, 'invalid_arguments')
+        for bad in ({'ids': [], 'read': True}, {'ids': ['m1'] * 1001, 'read': True}, {'ids': ['../x'], 'read': True},
+                    {'ids': 'm1', 'read': True}, {'ids': ['m1']}, {'ids': ['m1'], 'read': 'yes'}, {'ids': ['m1'], 'trashed': True}):
+            with self.assertRaises(Problem) as caught:
+                self.broker.mailcal_call('agent:main', 'mail_update_bulk', bad)
+            self.assertEqual(caught.exception.code, 'invalid_arguments', bad)
+        with self.assertRaises(Problem) as caught:
+            self.broker.mailcal_call('agent:main', 'mail_search', {'ids_only': True, 'max': 501})
+        self.assertEqual(caught.exception.code, 'invalid_arguments')
+        # Same agent level as mail_update: Draft only. Read-only agents are refused; the owner's Mail is not limited.
+        self.broker.set_agent_access('read_only')
+        self.broker.mailcal_call('agent:main', 'mail_search', {'ids_only': True})
+        with self.assertRaises(Problem) as refused:
+            self.broker.mailcal_call('agent:main', 'mail_update_bulk', {'ids': ['m1'], 'read': True})
+        self.assertEqual(refused.exception.code, 'agent_access_denied')
+        self.broker.mailcal_call('app:wizard-mail', 'mail_update_bulk', {'ids': ['m1'], 'read': True})
+        tool = next(t for t in server.tools() if t['name'] == 'mail_update_bulk')
+        self.assertEqual((tool['inputSchema']['required'], tool['annotations']), (['ids'], {}))
 
 
 class SignInFlowTests(QuickBase):

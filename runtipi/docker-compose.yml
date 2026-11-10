@@ -3,8 +3,8 @@
 # No named volumes (backups skip those). The page, apps and agents never receive a Google token.
 services:
   wizard-google:
-    # Built and pushed by .github/workflows/image.yml (amd64 + arm64) from commit 330f147; source: app/Dockerfile.
-    image: ghcr.io/humanitylabs-org/wizard-google:sha-330f14790080ecbb77367a6b85ed1a9c861db2c7@sha256:1852cdc06cc462eb95da6267e4af97d58eda9d84973766622826d566336c7e07
+    # Built and pushed by .github/workflows/image.yml (amd64 + arm64) from commit d10632f; source: app/Dockerfile.
+    image: ghcr.io/humanitylabs-org/wizard-google:sha-d10632f249862541d107b653896f1e39eab13dc7@sha256:7e844d45b85475dea4b3aed83088035dfe5b5bbef8a461e3877053674eec1ce1
     # A fresh App Manager data bind is root-owned; retain the sandbox below.
     user: "0:0"
     read_only: true

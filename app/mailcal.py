@@ -34,6 +34,10 @@ MAX_FILES = 10
 MAX_NEW_BYTES = 18 * 1024 * 1024
 MAX_DRAFT_BYTES = 18 * 1024 * 1024
 DRAFT_ID = r'[A-Za-z0-9_-]{1,256}'
+# Bulk mail changes (contract 1.3): Gmail batchModify takes up to 1000 ids in one call, and an ids-only search lists up
+# to 500 ids per page without fetching each message, so "Mark all as read" costs a few calls instead of ~3 per message.
+MAX_BULK = 1000
+MAX_IDS_PAGE = 500
 MIME = re.compile(r'[a-z0-9][a-z0-9!#$&^_.+-]{0,63}/[a-z0-9][a-z0-9!#$&^_.+-]{0,127}')
 
 
@@ -107,7 +111,8 @@ def mail_search(call, args):
     query = (FOLDERS[folder] + ' ' + query).strip()
     if args.get('unread_only') is True:
         query = (query + ' is:unread').strip()
-    limit = number(args, 'max', 10, 1, 25)
+    ids_only = args.get('ids_only') is True
+    limit = number(args, 'max', 100 if ids_only else 10, 1, MAX_IDS_PAGE if ids_only else 25)
     params = {'q': query, 'maxResults': limit}
     if folder == 'trash':
         params['includeSpamTrash'] = 'true'
@@ -116,6 +121,9 @@ def mail_search(call, args):
     listing = call('GET', f'{GMAIL}/messages', params)
     ids = [str(item.get('id', '')) for item in (listing.get('messages') or [])[:limit]]
     ids = [mid for mid in ids if re.fullmatch(MID, mid)]
+    if ids_only:
+        # One call per page: no per-message metadata fetch (for bulk changes such as Mark all as read).
+        return {'folder': folder, 'ids': ids, 'next_page_token': listing.get('nextPageToken'), 'untrusted': UNTRUSTED}
 
     def summary(mid):
         # no metadataHeaders: Composio's proxy keeps only the last repeated query value
@@ -202,6 +210,31 @@ def mail_update(call, args):
     current = call('GET', f'{GMAIL}/messages/{mid}', {'format': 'minimal'})
     labels = current.get('labelIds') or []
     return {'updated': True, 'id': mid, 'unread': 'UNREAD' in labels, 'archived': 'INBOX' not in labels, 'trashed': 'TRASH' in labels}
+
+
+def mail_update_bulk(call, args):
+    """Mark many messages read/unread or archived/unarchived in one Gmail batchModify call. Never deletes or trashes."""
+    ids = args.get('ids')
+    if not isinstance(ids, list) or not ids or len(ids) > MAX_BULK:
+        raise BadArgs(f'ids must be a list of 1 to {MAX_BULK} message ids.')
+    if any(not isinstance(mid, str) or not re.fullmatch(MID, mid) for mid in ids):
+        raise BadArgs('ids has a message id that is not valid.')
+    ids = list(dict.fromkeys(ids))
+    flags = {name: args.get(name) for name in ('read', 'archived') if args.get(name) is not None}
+    if not flags or any(not isinstance(v, bool) for v in flags.values()):
+        raise BadArgs('Pass read or archived as true or false.')
+    add, remove = [], []
+    if 'read' in flags:
+        (remove if flags['read'] else add).append('UNREAD')
+    if 'archived' in flags:
+        (remove if flags['archived'] else add).append('INBOX')
+    call('POST', f'{GMAIL}/messages/batchModify', None, {'ids': ids, 'addLabelIds': add, 'removeLabelIds': remove})
+    out = {'updated': True, 'count': len(ids), 'ids': ids}
+    if 'read' in flags:
+        out['unread'] = not flags['read']
+    if 'archived' in flags:
+        out['archived'] = flags['archived']
+    return out
 
 
 def _draft_view(draft, to, cc, subject, body, files=()):
@@ -515,6 +548,7 @@ def profile_email(call, service):
 TOOLS = {
     'mail_search': ('gmail', False, mail_search), 'mail_get': ('gmail', False, mail_get),
     'mail_draft': ('gmail', True, mail_draft), 'mail_send': ('gmail', True, mail_send), 'mail_update': ('gmail', True, mail_update),
+    'mail_update_bulk': ('gmail', True, mail_update_bulk),
     'calendar_list_events': ('calendar', False, calendar_list_events), 'calendar_create_event': ('calendar', True, calendar_create_event),
     'calendar_update_event': ('calendar', True, calendar_update_event), 'calendar_delete_event': ('calendar', True, calendar_delete_event),
     'calendar_respond': ('calendar', True, calendar_respond),
@@ -549,7 +583,10 @@ SCHEMAS = [
     ('mail_search', 'Search the owner\'s mail. Returns sender, subject, date, a short preview and unread state per message.' + _UNTRUSTED_NOTE,
      True, _schema([], account=_ACCOUNT, query={'type': 'string', 'description': 'Search words; the provider\'s search syntax works (e.g. from:anna, subject:invoice).'},
                    folder=_FOLDER, unread_only={'type': 'boolean', 'description': 'Only unread messages.'},
-                   max={'type': 'integer', 'minimum': 1, 'maximum': 25}, page_token={'type': 'string'})),
+                   ids_only={'type': 'boolean', 'description': 'Return only message ids (ids[]), up to 500 per page, without '
+                                                               'fetching each message: use with mail_update_bulk.'},
+                   max={'type': 'integer', 'minimum': 1, 'maximum': 500, 'description': 'At most 25, or 500 with ids_only.'},
+                   page_token={'type': 'string'})),
     ('mail_get', 'Read one message in full (text body, people, attachments list).' + _UNTRUSTED_NOTE,
      True, _schema(['id'], account=_ACCOUNT, id={'type': 'string', 'description': 'Message id from mail_search.'},
                    format={'type': 'string', 'enum': ['text', 'html'], 'description': 'html adds body_html (unsanitized; mail apps clean it).'})),
@@ -564,6 +601,11 @@ SCHEMAS = [
                     'Ask the owner before archiving or trashing.',
      False, _schema(['id'], account=_ACCOUNT, id={'type': 'string'}, read={'type': 'boolean'}, archived={'type': 'boolean'},
                     trashed={'type': 'boolean'})),
+    ('mail_update_bulk', 'Mark up to 1000 messages read or unread, or archive them (or back), in one call. Nothing is '
+                         'deleted or trashed. Get the ids with mail_search ids_only. Ask the owner before archiving.',
+     False, _schema(['ids'], account=_ACCOUNT, ids={'type': 'array', 'items': {'type': 'string'}, 'minItems': 1, 'maxItems': MAX_BULK,
+                                                    'description': 'Message ids from mail_search.'},
+                    read={'type': 'boolean'}, archived={'type': 'boolean'})),
     ('mail_send', 'SENDS MAIL. Sends one existing draft (from mail_draft). Only call after the owner has seen this exact draft and said yes.',
      False, _schema(['draft_id'], account=_ACCOUNT, draft_id={'type': 'string'})),
     ('calendar_list_events', 'List events between two times (default: upcoming), optionally matching words.' + _UNTRUSTED_NOTE,
