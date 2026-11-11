@@ -10,8 +10,8 @@
     "utilities"
   ],
   "description": "Gmail, Calendar, Drive, Docs, Sheets, Contacts and YouTube for your Wizard agent, through gog. Sign in once per Google account (several accounts), then switch services on per account. Sign-ins stay encrypted on this box.",
-  "tipi_version": 18,
-  "version": "0.4.3",
+  "tipi_version": 19,
+  "version": "0.4.4",
   "source": "https://github.com/humanitylabs-org/wizard-google",
   "exposable": false,
   "supported_architectures": [
@@ -19,7 +19,7 @@
     "arm64"
   ],
   "created_at": 1792454400000,
-  "updated_at": 1794368106575,
+  "updated_at": 1794371116800,
   "dynamic_config": true,
   "min_tipi_version": "4.8.0",
   "uid": 1000,

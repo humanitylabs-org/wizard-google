@@ -25,7 +25,7 @@ whichever way an account is connected: Google with the owner's own client, Googl
 | `mail_send` | `account?`, `draft_id` | `sent: true`, `id`, `thread_id` |
 | `calendar_list_events` | `account?`, `calendar_id?`, `time_min?`, `time_max?`, `query?`, `max?`, `page_token?` | `events[]`, `next_page_token`, `untrusted` |
 | `calendar_create_event` | `account?`, `calendar_id?`, `title`, `start`, `end`, `time_zone?`, `location?`, `description?`, `attendees[]` | `created`, `event` |
-| `calendar_update_event` | `account?`, `calendar_id?`, `id`, any of the create fields | `updated`, `event` |
+| `calendar_update_event` | `account?`, `calendar_id?`, `id`, any of the create fields; or `scope: series` with `shift_start_minutes?`, `shift_end_minutes?` (1.5) | `updated`, `event`; with `scope: series` also `scope`, `series_id` |
 | `calendar_delete_event` | `account?`, `calendar_id?`, `id` | `deleted`, `id` |
 | `calendar_respond` | `account?`, `calendar_id?`, `id`, `response` (`accepted` \| `declined` \| `tentative`), `comment?` | `responded`, `event` |
 
@@ -63,13 +63,30 @@ Additions in 1.4 (who changed an event, backward compatible):
   Google keeps the mark in a private extended property (`extendedProperties.private.wizardBy` = `agent` | `owner`),
   visible only to this calendar's owner. Calendar shows "Changed: by your agent" for it.
 
+Additions in 1.5 (repeating events as a whole, backward compatible):
+- Every event carries `series_id`: the id of the series it belongs to (Google `recurringEventId`, Microsoft
+  `seriesMasterId`; a series itself gives its own id), or `null` for an event that does not repeat. Lists still return each
+  repeat as its own event.
+- `calendar_update_event` takes `scope`: `occurrence` (the default, as before: only the event `id` names) or `series`.
+  With `series`, `id` may be one repeat or the `series_id`, and the series moves with `shift_start_minutes` and/or
+  `shift_end_minutes` (whole minutes, -1439 to 1439): its start and end move by that much wall time in the series' own
+  time zone, so every repeat moves the same amount (a drag moves both; a resize only the end). `start` / `end` are refused
+  with `scope: series`; `title`, `location`, `description` and `attendees` may come along. The answer is the series
+  (`event`) plus `scope: series` and `series_id`. Undo is the opposite shift on the `series_id`.
+- Same day only: the repeat rule (e.g. every Monday) is not rewritten, so a shift that would change the series' start date
+  is refused (`invalid_arguments`), and so is one that makes it end before it starts. Repeats changed one by one keep
+  their own times. Agents keep their calendar level: at Suggest only a series change is a suggestion like any other.
+  Microsoft: a series in a custom time zone (`tzone://Microsoft/Custom`) and all-day series are refused.
+- A source before 1.5 answers `scope: series` with `invalid_arguments` ("Nothing to change") and changes nothing, so front
+  ends offer the whole-series change only for events that carry `series_id`.
+
 Message summary: `id`, `thread_id`, `from` {name, email}, `to[]`, `cc[]`, `subject`, `date` (ISO 8601), `snippet`,
 `unread`, `labels[]`.
 
 Event: `id`, `calendar_id`, `title`, `start`/`end` (`{date}` for all-day, else `{date_time, time_zone}`), `all_day`,
 `location`, `description`, `attendees[]` {email, name, response, self, organizer}, `organizer`, `is_organizer`,
 `my_response` (`none` | `accepted` | `declined` | `tentative` | `organizer`), `status`, `link`, `recurring`,
-`online_meeting`, `by_agent` (1.4).
+`online_meeting`, `by_agent` (1.4), `series_id` (1.5).
 
 Times in: a date (`2026-11-04`) for all-day, an RFC 3339 time with offset, or a local time plus `time_zone` (IANA).
 
