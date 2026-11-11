@@ -24,7 +24,7 @@ from agent_access import SUGGESTION_TOOLS, SUGGESTION_MCP_TOOLS  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / 'web'
 APP_ID = 'wizard-google'
-VERSION = '0.4.3'
+VERSION = '0.4.4'
 # Owner feature switches (wizard.app-switches/1, wizard-os docs/APP_SWITCHES.md). None yet: every Google change so far
 # is a fix that ships on. New features are added here, off by default, with their issues, so the Tracker's Try it finds them.
 SWITCHES = []

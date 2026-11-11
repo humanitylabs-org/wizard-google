@@ -5,6 +5,7 @@ runs for an owner's own Google client (a direct token) and for Quick connect (Co
 Mail content comes from outside senders: it is returned as data and marked untrusted, never acted on.
 """
 import base64
+import datetime
 import binascii
 import html
 import mimetypes
@@ -438,7 +439,8 @@ def _event(item, calendar):
             'attendees': attendees, 'organizer': {'email': organizer.get('email'), 'name': organizer.get('displayName', '')},
             'is_organizer': bool(organizer.get('self')), 'my_response': me['response'] if me else None,
             'status': item.get('status'), 'link': item.get('htmlLink'), 'recurring': bool(item.get('recurringEventId') or item.get('recurrence')),
-            'online_meeting': item.get('hangoutLink'), 'by_agent': _by(item) == 'agent'}
+            'online_meeting': item.get('hangoutLink'), 'by_agent': _by(item) == 'agent',
+            'series_id': item.get('recurringEventId') or (item.get('id') if item.get('recurrence') else None)}
 
 
 # Who last added or changed an event through this app (contract 1.4): a private extended property, only visible to this
@@ -525,8 +527,69 @@ def calendar_create_event(call, args, by='owner'):
     return {'created': True, 'event': _event(created, calendar)}
 
 
+# Moving a whole series (contract 1.5): `scope: series` with `shift_start_minutes` / `shift_end_minutes` moves the series'
+# own start and end by that many minutes of wall time in the series' time zone, so every repeat moves the same amount.
+# Same day only: the repeat rule (e.g. every Monday) is not rewritten, so a shift that changes the series' start date is
+# refused. Repeats changed one by one keep their own times (Google's exceptions).
+MAX_SHIFT = 1439
+
+
+def _shift_arg(args, name):
+    value = args.get(name, 0)
+    if value is None:
+        return 0
+    if isinstance(value, bool) or not isinstance(value, int) or abs(value) > MAX_SHIFT:
+        raise BadArgs(f'{name} must be a whole number of minutes between -{MAX_SHIFT} and {MAX_SHIFT}.')
+    return value
+
+
+def _shifted(when, minutes):
+    """A Google start/end moved by `minutes` of wall time; the zone and offset style stay as they were."""
+    stamp = str((when or {}).get('dateTime') or '')
+    match = re.fullmatch(r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?)(?:\.\d+)?(Z|[+-]\d{2}:\d{2})?', stamp)
+    if not match:
+        raise BadArgs('This repeating event has no start time to move (all-day series move in Google Calendar).')
+    wall = datetime.datetime.fromisoformat(match.group(1)) + datetime.timedelta(minutes=minutes)
+    out = {'dateTime': wall.strftime('%Y-%m-%dT%H:%M:%S') + (match.group(2) or '')}
+    if (when or {}).get('timeZone'):
+        out['timeZone'] = when['timeZone']
+    return out, wall.date() != datetime.datetime.fromisoformat(match.group(1)).date()
+
+
+def _update_series(call, calendar, event, args, by):
+    start_by, end_by = _shift_arg(args, 'shift_start_minutes'), _shift_arg(args, 'shift_end_minutes')
+    if not start_by and not end_by:
+        raise BadArgs('Nothing to change: give shift_start_minutes and/or shift_end_minutes.')
+    if any(args.get(name) is not None for name in ('start', 'end')):
+        raise BadArgs('With scope series, move the series with shift_start_minutes / shift_end_minutes, not start / end.')
+    base = f'{CALENDAR}/calendars/{urllib.parse.quote(calendar, safe="")}/events'
+    item = call('GET', f'{base}/{event}')
+    master_id = item.get('recurringEventId') or (item.get('id') if item.get('recurrence') else None)
+    if not master_id:
+        raise BadArgs('This event does not repeat; change it without scope series.')
+    master = item if master_id == item.get('id') else call('GET', f'{base}/{_id({"i": master_id}, "i", r"[A-Za-z0-9_@.-]{1,1024}")}')
+    start, moved_day = _shifted(master.get('start'), start_by)
+    end, _ = _shifted(master.get('end'), end_by)
+    if moved_day:
+        raise BadArgs('Moving every repeat to another day is not possible here (the repeat rule stays); change the series in Google Calendar.')
+    if end['dateTime'][:19] <= start['dateTime'][:19] and (start.get('timeZone') == end.get('timeZone')):
+        raise BadArgs('The series would end before it starts.')
+    body = _event_body({k: v for k, v in args.items() if k not in ('start', 'end', 'time_zone')}, False) \
+        if any(args.get(k) is not None for k in ('title', 'description', 'location', 'attendees')) else {}
+    body.update(start=start, end=end)
+    updated = call('PATCH', f'{base}/{master_id}', {'sendUpdates': 'all'}, _mark(body, by))
+    return {'updated': True, 'scope': 'series', 'series_id': master_id, 'event': _event(updated, calendar)}
+
+
 def calendar_update_event(call, args, by='owner'):
     calendar, event = _calendar(args), _id(args, 'id', r'[A-Za-z0-9_@.-]{1,1024}')
+    scope = args.get('scope') or 'occurrence'
+    if scope not in ('occurrence', 'series'):
+        raise BadArgs('scope must be occurrence (default) or series.')
+    if scope == 'series':
+        return _update_series(call, calendar, event, args, by)
+    if any(args.get(name) is not None for name in ('shift_start_minutes', 'shift_end_minutes')):
+        raise BadArgs('shift_start_minutes / shift_end_minutes need scope series.')
     updated = call('PATCH', f'{CALENDAR}/calendars/{urllib.parse.quote(calendar, safe="")}/events/{event}', {'sendUpdates': 'all'},
                    _mark(_event_body(args, False), by))
     return {'updated': True, 'event': _event(updated, calendar)}
@@ -638,7 +701,14 @@ SCHEMAS = [
                     location={'type': 'string'}, description={'type': 'string'}, attendees=_ADDR)),
     ('calendar_update_event', 'Change an event (only the fields you pass; guests are told). At the owner\'s default (Suggest only) this only saves a suggestion the owner approves in Calendar.',
      False, _schema(['id'], account=_ACCOUNT, calendar_id=_CAL, id={'type': 'string'}, title={'type': 'string'}, start=_TIME, end=_TIME,
-                    time_zone={'type': 'string'}, location={'type': 'string'}, description={'type': 'string'}, attendees=_ADDR)),
+                    time_zone={'type': 'string'}, location={'type': 'string'}, description={'type': 'string'}, attendees=_ADDR,
+                    scope={'type': 'string', 'enum': ['occurrence', 'series'],
+                           'description': 'series: change every repeat of a repeating event (id may be one repeat or its series_id). '
+                                          'Move it with shift_start_minutes / shift_end_minutes instead of start / end.'},
+                    shift_start_minutes={'type': 'integer', 'minimum': -MAX_SHIFT, 'maximum': MAX_SHIFT,
+                                         'description': 'With scope series: move every repeat\'s start by this many minutes (same day only).'},
+                    shift_end_minutes={'type': 'integer', 'minimum': -MAX_SHIFT, 'maximum': MAX_SHIFT,
+                                       'description': 'With scope series: move every repeat\'s end by this many minutes.'})),
     ('calendar_delete_event', 'Delete an event (guests are told). At the owner\'s default (Suggest only) this only saves a suggestion the owner approves in Calendar.',
      False, _schema(['id'], account=_ACCOUNT, calendar_id=_CAL, id={'type': 'string'})),
     ('calendar_respond', 'Answer an invitation: accepted, declined or tentative. At the owner\'s default (Suggest only) this only saves a suggestion the owner approves in Calendar.',
