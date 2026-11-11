@@ -438,7 +438,25 @@ def _event(item, calendar):
             'attendees': attendees, 'organizer': {'email': organizer.get('email'), 'name': organizer.get('displayName', '')},
             'is_organizer': bool(organizer.get('self')), 'my_response': me['response'] if me else None,
             'status': item.get('status'), 'link': item.get('htmlLink'), 'recurring': bool(item.get('recurringEventId') or item.get('recurrence')),
-            'online_meeting': item.get('hangoutLink')}
+            'online_meeting': item.get('hangoutLink'), 'by_agent': _by(item) == 'agent'}
+
+
+# Who last added or changed an event through this app (contract 1.4): a private extended property, only visible to this
+# calendar's owner. An agent's create / update (Can edit, or a suggestion the owner approved) sets "agent"; the owner's
+# own create / update from Calendar sets "owner", which clears it. Google merges private properties on PATCH, so other
+# apps' keys on the event stay.
+BY_KEY = 'wizardBy'
+
+
+def _by(item):
+    props = item.get('extendedProperties') if isinstance(item.get('extendedProperties'), dict) else {}
+    private = props.get('private') if isinstance(props.get('private'), dict) else {}
+    return private.get(BY_KEY)
+
+
+def _mark(body, by):
+    body['extendedProperties'] = {'private': {BY_KEY: 'agent' if by == 'agent' else 'owner'}}
+    return body
 
 
 def _resp_out(value):
@@ -500,17 +518,17 @@ def calendar_list_events(call, args):
             'next_page_token': listing.get('nextPageToken'), 'untrusted': UNTRUSTED}
 
 
-def calendar_create_event(call, args):
+def calendar_create_event(call, args, by='owner'):
     calendar = _calendar(args)
     created = call('POST', f'{CALENDAR}/calendars/{urllib.parse.quote(calendar, safe="")}/events', {'sendUpdates': 'all'},
-                   _event_body(args, True))
+                   _mark(_event_body(args, True), by))
     return {'created': True, 'event': _event(created, calendar)}
 
 
-def calendar_update_event(call, args):
+def calendar_update_event(call, args, by='owner'):
     calendar, event = _calendar(args), _id(args, 'id', r'[A-Za-z0-9_@.-]{1,1024}')
     updated = call('PATCH', f'{CALENDAR}/calendars/{urllib.parse.quote(calendar, safe="")}/events/{event}', {'sendUpdates': 'all'},
-                   _event_body(args, False))
+                   _mark(_event_body(args, False), by))
     return {'updated': True, 'event': _event(updated, calendar)}
 
 
@@ -553,6 +571,8 @@ TOOLS = {
     'calendar_update_event': ('calendar', True, calendar_update_event), 'calendar_delete_event': ('calendar', True, calendar_delete_event),
     'calendar_respond': ('calendar', True, calendar_respond),
 }
+# Tools that record who made the change (handler takes by='agent' | 'owner').
+MARKED = ('calendar_create_event', 'calendar_update_event')
 
 
 # ---------- MCP tool descriptions (same names and arguments in every Wizard mail/calendar source) ----------

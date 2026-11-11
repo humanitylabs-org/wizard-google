@@ -56,13 +56,20 @@ Additions in 1.3 (bulk changes, backward compatible):
   `$batch`, 20 per request) follows.
 - Mail apps use them when the source lists `mail_update_bulk`, and fall back to per-message `mail_update` otherwise.
 
+Additions in 1.4 (who changed an event, backward compatible):
+- Every event carries `by_agent`: `true` when an agent added it or made its last change through this source
+  (`calendar_create_event` / `calendar_update_event` at Can edit, or a suggestion the owner approved), else `false`. The
+  owner's own create or update (a Wizard app acting for the owner) clears it; answering an invitation leaves it as it is.
+  Google keeps the mark in a private extended property (`extendedProperties.private.wizardBy` = `agent` | `owner`),
+  visible only to this calendar's owner. Calendar shows "Changed: by your agent" for it.
+
 Message summary: `id`, `thread_id`, `from` {name, email}, `to[]`, `cc[]`, `subject`, `date` (ISO 8601), `snippet`,
 `unread`, `labels[]`.
 
 Event: `id`, `calendar_id`, `title`, `start`/`end` (`{date}` for all-day, else `{date_time, time_zone}`), `all_day`,
 `location`, `description`, `attendees[]` {email, name, response, self, organizer}, `organizer`, `is_organizer`,
 `my_response` (`none` | `accepted` | `declined` | `tentative` | `organizer`), `status`, `link`, `recurring`,
-`online_meeting`.
+`online_meeting`, `by_agent` (1.4).
 
 Times in: a date (`2026-11-04`) for all-day, an RFC 3339 time with offset, or a local time plus `time_zone` (IANA).
 

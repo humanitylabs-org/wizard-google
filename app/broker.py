@@ -19,7 +19,7 @@ import mailcal
 import setup_flow
 import gogrun
 from quick import Quick, QuickProblem
-from agent_access import AgentAccess, AccessRefused, Suggestions, SUGGESTION_TOOLS, DryRun, dry_call
+from agent_access import AgentAccess, AccessRefused, Suggestions, SUGGESTION_TOOLS, DryRun, dry_call, is_agent
 from google import OPERATIONS, IDENTITY_SCOPES, SERVICES, GoogleError, BadArgs
 from store import Store
 
@@ -896,7 +896,8 @@ class Broker:
             self._record(caller, '-', tool, 'ok')
             return {'dismissed': True, 'id': item['id']}
         # Approve: the owner's change, applied as the owner (the caller is the front end's grant, so no new suggestion).
-        result = self.mailcal_call(caller, item['tool'], item['args'])
+        # The event still says an agent made it, because the agent wrote it.
+        result = self.mailcal_call(caller, item['tool'], item['args'], by='agent')
         self.suggestions.drop(item['id'])
         self._record(caller, '-', tool, 'ok')
         return {'approved': True, 'id': item['id'], 'result': result}
@@ -999,7 +1000,7 @@ class Broker:
                 return self.transport.request(method, url, token=token, body=body)
         return call
 
-    def mailcal_call(self, caller, tool, args):
+    def mailcal_call(self, caller, tool, args, by=None):
         """One mail/calendar tool on one account. Mail and event text in the result is untrusted data."""
         args = args if isinstance(args, dict) else {}
         if tool in SUGGESTION_TOOLS:
@@ -1018,7 +1019,10 @@ class Broker:
         via = 'composio' if account.startswith('q-') else 'own-client'
         try:
             call = self.quick.caller_for(account, service) if via == 'composio' else self._own_call(account)
-            result = handler(call, args)
+            if tool in mailcal.MARKED:
+                result = handler(call, args, by=by or ('agent' if is_agent(caller) else 'owner'))
+            else:
+                result = handler(call, args)
         except QuickProblem as problem:
             raise Problem(problem.status, problem.code, problem.message, **problem.extra) from None
         except BadArgs as bad:
