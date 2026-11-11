@@ -186,7 +186,12 @@ class FakeComposio:
             if method == 'GET':
                 return 200, self.events[rest]
             if method == 'PATCH':
-                self.events[rest].update(body)
+                # Google's patch semantics: nested objects (extendedProperties.private) merge, other fields replace.
+                def merge(into, new):
+                    for k, v in new.items():
+                        into[k] = merge(dict(into.get(k) or {}), v) if isinstance(v, dict) and isinstance(into.get(k), dict) else v
+                    return into
+                merge(self.events[rest], body)
                 return 200, self.events[rest]
             if method == 'DELETE':
                 self.events.pop(rest)
@@ -485,6 +490,42 @@ class ConnectTests(QuickBase):
         self.assertEqual(status['calendar_access']['level'], 'suggest_only')
         self.assertNotIn('mail_send', status['mail_calendar']['tools'])
         self.assertNotIn('calendar_suggestion_approve', status['mail_calendar']['tools'])
+
+    def test_calendar_events_say_when_an_agent_made_them(self):
+        """wizard-google#17: an event an agent added or last changed lists with by_agent; the owner's edit clears it."""
+        first = self.connect('gmail')
+        self.connect('calendar', first['account'])
+        self.fake.events['ev0']['extendedProperties'] = {'private': {'otherApp': 'keep'}}
+
+        def by_agent(eid):
+            listed = self.broker.mailcal_call('app:wizard-calendar', 'calendar_list_events', {})['events']
+            return next(e['by_agent'] for e in listed if e['id'] == eid)
+
+        self.assertIs(by_agent('ev0'), False)  # an event nobody changed through Wizard
+        self.broker.access.set(calendar='can_edit')
+        made = self.broker.mailcal_call('agent:main', 'calendar_create_event', {'title': 'Gym', 'start': '2026-11-05', 'end': '2026-11-06'})
+        self.assertIs(made['event']['by_agent'], True)
+        self.assertIs(by_agent(made['event']['id']), True)
+        # An agent's change to the owner's event marks it, and keeps other apps' private properties.
+        self.broker.mailcal_call('agent:helper', 'calendar_update_event', {'id': 'ev0', 'title': 'Standup (moved)'})
+        self.assertIs(by_agent('ev0'), True)
+        self.assertEqual(self.fake.events['ev0']['extendedProperties']['private']['otherApp'], 'keep')
+        # The owner's own edit from Calendar clears it; the owner's new event is not the agent's.
+        self.broker.mailcal_call('app:wizard-calendar', 'calendar_update_event', {'id': 'ev0', 'title': 'Standup'})
+        self.assertIs(by_agent('ev0'), False)
+        mine = self.broker.mailcal_call('app:wizard-calendar', 'calendar_create_event', {'title': 'Mine', 'start': '2026-11-06', 'end': '2026-11-07'})
+        self.assertIs(mine['event']['by_agent'], False)
+        # A suggestion the owner approves is still the agent's change.
+        self.broker.access.set(calendar='suggest_only')
+        suggested = self.broker.mailcal_call('agent:main', 'calendar_update_event', {'id': 'ev0', 'title': 'Standup (agent)'})
+        self.assertIs(by_agent('ev0'), False)  # nothing changed yet
+        self.broker.mailcal_call('app:wizard-calendar', 'calendar_suggestion_approve', {'id': suggested['suggestion']['id']})
+        self.assertIs(by_agent('ev0'), True)
+        # Answering an invitation does not change who made the event.
+        self.broker.mailcal_call('app:wizard-calendar', 'calendar_update_event', {'id': 'ev0', 'title': 'Standup'})
+        self.broker.access.set(calendar='can_edit')
+        self.broker.mailcal_call('agent:main', 'calendar_respond', {'id': 'ev0', 'response': 'accepted'})
+        self.assertIs(by_agent('ev0'), False)
 
     def test_revoked_at_composio_asks_to_reconnect(self):
         self.connect('gmail')
