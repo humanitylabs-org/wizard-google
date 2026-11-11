@@ -76,6 +76,7 @@ Additions in 1.5 (repeating events as a whole, backward compatible):
 - Same day only: the repeat rule (e.g. every Monday) is not rewritten, so a shift that would change the series' start date
   is refused (`invalid_arguments`), and so is one that makes it end before it starts. Repeats changed one by one keep
   their own times. Agents keep their calendar level: at Suggest only a series change is a suggestion like any other.
+  Microsoft: a series in a custom time zone (`tzone://Microsoft/Custom`) and all-day series are refused.
 - A source before 1.5 answers `scope: series` with `invalid_arguments` ("Nothing to change") and changes nothing, so front
   ends offer the whole-series change only for events that carry `series_id`.
 
