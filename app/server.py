@@ -24,7 +24,10 @@ from agent_access import SUGGESTION_TOOLS, SUGGESTION_MCP_TOOLS  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / 'web'
 APP_ID = 'wizard-google'
-VERSION = '0.4.1'
+VERSION = '0.4.2'
+# Owner feature switches (wizard.app-switches/1, wizard-os docs/APP_SWITCHES.md). None yet: every Google change so far
+# is a fix that ships on. New features are added here, off by default, with their issues, so the Tracker's Try it finds them.
+SWITCHES = []
 ASSETS = {'index.html', 'app.js', 'styles.css', 'boot.js', 'tokens.css', 'ui.css', 'appearance-client.js', 'sheet.js', 'icon.png', 'standalone.css', 'close.js', 'signin.js'}
 def out_origin(trusted, host, own):
     """The same box on another of its trusted ports. Wizard keeps links to its own origin inside Wizard, so the
@@ -221,6 +224,35 @@ class App:
         return https[0] if https else None
 
 
+SWITCH_LOCK = threading.Lock()
+
+
+def _saved_switches(app):
+    try:
+        saved = json.loads((Path(app.config.data_dir) / 'switches.json').read_text())
+    except (OSError, ValueError):
+        saved = {}  # missing or unreadable: the defaults (off)
+    return saved if isinstance(saved, dict) else {}
+
+
+def switches_doc(app):
+    saved = _saved_switches(app)
+    return {'contract': 'wizard.app-switches/1', 'switches': [
+        dict(s, on=saved[s['id']] if isinstance(saved.get(s['id']), bool) else s['default']) for s in SWITCHES]}
+
+
+def set_switch(app, switch_id, on):
+    with SWITCH_LOCK:
+        known = {s['id'] for s in SWITCHES}
+        saved = {k: v for k, v in _saved_switches(app).items() if k in known and isinstance(v, bool)}
+        saved[switch_id] = on
+        path = Path(app.config.data_dir) / 'switches.json'
+        tmp = path.with_name('.switches.json.tmp')
+        tmp.write_text(json.dumps(saved))
+        os.replace(tmp, path)
+    return switches_doc(app)
+
+
 def handler_for(app):
     config = app.config
 
@@ -323,6 +355,16 @@ def handler_for(app):
                 raise Problem(401, 'owner_token_required', 'Owner gateway token required.')
             raise Problem(503, 'owner_auth_unconfigured', 'Set WIZARD_OWNER_LOGINS (Tailscale) or WIZARD_OWNER_TOKEN.')
 
+        def switch_owner(self):
+            # wizard.app-switches/1: the owner (Tailscale Serve login or owner token) with `X-Wizard-Switch: 1`; no
+            # session needed, so the Tracker card and the App Manager reach it. Never a bearer or a box-local caller.
+            if self.headers.get('X-Wizard-Switch') != '1':
+                raise Problem(403, 'owner_only', 'Only this Wizard\'s owner can see or change switches.')
+            host = self.owner()
+            if (self.headers.get('Sec-Fetch-Site') or 'same-origin').lower() not in ('same-origin', 'none'):
+                raise Problem(403, 'origin_rejected', 'Open this app from your Wizard.')
+            return host
+
         def same_origin_write(self, host):
             origin = (self.headers.get('Origin') or '').lower()
             if origin not in config.trusted_origins or origin != app.origin_for(host) or (self.headers.get('Sec-Fetch-Site') or 'same-origin').lower() != 'same-origin':
@@ -404,6 +446,9 @@ def handler_for(app):
                 if path == '/healthz':
                     self.host()
                     return self.send_json(200, {'ok': True, 'app': APP_ID, 'version': VERSION})
+                if path == '/api/switches':
+                    self.switch_owner()
+                    return self.send_json(200, switches_doc(app))
                 if path == '/api/connection':
                     self.host()
                     if any(self.headers.get(x) for x in FORWARDING) or any(k.lower().startswith(('tailscale-', 'cf-')) for k in self.headers.keys()):
@@ -528,6 +573,15 @@ def handler_for(app):
                     if path == '/consumer/v1/request':
                         return self.send_json(201, app.broker.request_access(caller, body.get('operations'), body.get('account'), body.get('reason', '')))
                     raise Problem(404, 'not_found', 'Not found.')
+                if path == '/api/switches':
+                    host = self.switch_owner()
+                    self.same_origin_write(host)
+                    body = self.body()
+                    if not isinstance(body.get('id'), str) or not isinstance(body.get('on'), bool):
+                        raise Problem(400, 'invalid_body', 'Send {"id": "...", "on": true|false}.')
+                    if body['id'] not in {s['id'] for s in SWITCHES}:
+                        raise Problem(404, 'unknown_switch', 'No such switch.')
+                    return self.send_json(200, set_switch(app, body['id'], body['on']))
                 host = self.owner()
                 origin = self.same_origin_write(host)
                 if path == '/api/session':

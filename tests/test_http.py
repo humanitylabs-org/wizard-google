@@ -324,6 +324,18 @@ class ShellOwner(unittest.TestCase):
         self.assertEqual(conn.getresponse().status, 401)
         conn.close()
 
+    def test_switches_contract(self):
+        c = Client(self.port, 'box.tail1234.ts.net', 'https://box.tail1234.ts.net')
+        who = {'Tailscale-User-Login': 'owner@example.com', 'X-Wizard-Switch': '1'}
+        status, doc, _ = c.send('GET', '/api/switches', headers=who, browser=False)
+        self.assertEqual((status, doc), (200, {'contract': 'wizard.app-switches/1', 'switches': []}))
+        post = {**who, 'Origin': 'https://box.tail1234.ts.net'}
+        self.assertEqual(c.send('POST', '/api/switches', {'id': 'nope', 'on': True}, post, browser=False)[0], 404)
+        self.assertEqual(c.send('POST', '/api/switches', {'id': 'nope', 'on': 'x'}, post, browser=False)[0], 400)
+        self.assertEqual(c.send('POST', '/api/switches', {'id': 'nope', 'on': True}, {**post, 'Origin': 'https://evil.example'}, browser=False)[0], 403)
+        self.assertEqual(c.send('GET', '/api/switches', headers={'Tailscale-User-Login': 'owner@example.com'}, browser=False)[0], 403)
+        self.assertEqual(c.send('GET', '/api/switches', headers={**who, 'Tailscale-User-Login': 'guest@example.com'}, browser=False)[0], 401)
+
 
 if __name__ == '__main__':
     unittest.main()
