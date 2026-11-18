@@ -16,6 +16,8 @@ The Google app holds the owner's Google sign-ins on this box (several accounts, 
 
 When the owner signed in to Google only in Connected accounts, `google_status` shows those accounts under `connected_accounts`. Then use `drive_search` `{"query": "budget"}`, `drive_read` `{"file_id": "<id>"}` (Docs/Slides as text, Sheets as CSV), `contacts_search` `{"query": "Anna"}`, and `mail_search` / `mail_get` / `mail_draft` as below: they run on that sign-in with no second Google sign-in. `google_run` (gog) still needs a sign-in in this app. `connected_accounts_unavailable`: tell the owner to update the Google app and approve its connection to Connected accounts. `service_off` or `permission_missing`: the owner turns on Google tools for your wizard in Connected accounts and taps Allow on the account.
 
+Calendar (wizard-connectors#29): when this app has no Google sign-in for the calendar and Connected accounts has **Calendar edits for your wizard** on with an account allowed, `calendar_list_events`, `calendar_create_event`, `calendar_update_event`, `calendar_delete_event` and `calendar_respond` run on that Connected accounts account (`via: connected-accounts`). Calendar > Settings > Agent access applies exactly as on this app's own sign-in (Suggest only saves a suggestion the owner approves in Calendar).
+
 ## Mail and calendar tools (every account, also Quick connect)
 
 These work on every account with Gmail/Calendar on, however it was connected. Prefer them for mail and events; Quick connect accounts (`via: composio` in `google_status`) can only use these, not `google_run`.
