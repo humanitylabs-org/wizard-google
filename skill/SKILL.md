@@ -12,6 +12,10 @@ The Google app holds the owner's Google sign-ins on this box (several accounts, 
 2. Call `google_run` with `args` = the gog command words after `gog`, starting with the service, and `account` = the email or label when more than one account has that service on.
 3. Unsure of a command's flags? Call `google_help` with e.g. `"gmail search"` or `"calendar create"`. It returns gog's own contract. Don't guess flags.
 
+## Connected accounts sign-in (switch `connected-accounts`, when `google_status` has `connected_accounts`)
+
+When the owner signed in to Google only in Connected accounts, `google_status` shows those accounts under `connected_accounts`. Then use `drive_search` `{"query": "budget"}`, `drive_read` `{"file_id": "<id>"}` (Docs/Slides as text, Sheets as CSV), `contacts_search` `{"query": "Anna"}`, and `mail_search` / `mail_get` / `mail_draft` as below: they run on that sign-in with no second Google sign-in. `google_run` (gog) still needs a sign-in in this app. `connected_accounts_unavailable`: tell the owner to update the Google app and approve its connection to Connected accounts. `service_off` or `permission_missing`: the owner turns on Google tools for your wizard in Connected accounts and taps Allow on the account.
+
 ## Mail and calendar tools (every account, also Quick connect)
 
 These work on every account with Gmail/Calendar on, however it was connected. Prefer them for mail and events; Quick connect accounts (`via: composio` in `google_status`) can only use these, not `google_run`.

@@ -328,7 +328,8 @@ class ShellOwner(unittest.TestCase):
         c = Client(self.port, 'box.tail1234.ts.net', 'https://box.tail1234.ts.net')
         who = {'Tailscale-User-Login': 'owner@example.com', 'X-Wizard-Switch': '1'}
         status, doc, _ = c.send('GET', '/api/switches', headers=who, browser=False)
-        self.assertEqual((status, doc), (200, {'contract': 'wizard.app-switches/1', 'switches': []}))
+        self.assertEqual((status, doc['contract']), (200, 'wizard.app-switches/1'))
+        self.assertEqual([(x['id'], x['default'], x['on']) for x in doc['switches']], [('connected-accounts', False, False)])
         post = {**who, 'Origin': 'https://box.tail1234.ts.net'}
         self.assertEqual(c.send('POST', '/api/switches', {'id': 'nope', 'on': True}, post, browser=False)[0], 404)
         self.assertEqual(c.send('POST', '/api/switches', {'id': 'nope', 'on': 'x'}, post, browser=False)[0], 400)
