@@ -249,6 +249,7 @@ class App:
         self.sessions = Sessions()
         self.grants = WizardGrants(config.grants_file)
         self.connected = connected.Connected(config.grants_file)
+        self.broker.connected_calendar = self.connected
         self.origins = []
 
     def origin_for(self, host):

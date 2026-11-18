@@ -39,6 +39,12 @@ TOOLS = {
 }
 # Mail tools an agent may run on the Connected accounts sign-in (Connected accounts keeps the owner's level; no send).
 MAIL = ('mail_search', 'mail_get', 'mail_draft')
+# Calendar on the Connected accounts sign-in (wizard-connectors#29; its switch google-calendar-edits, off by default):
+# this app's own calendar_* tools, with Calendar > Settings > Agent access checked here first (agent_access.py) as
+# always; Connected accounts only makes the Google Calendar call with its token (`calendar_http`).
+CALENDAR = ('calendar_status', 'calendar_http')
+# Problems from this app's own account choice that the Connected accounts sign-in may answer instead.
+CALENDAR_FALLBACK = ('not_connected', 'service_off', 'account_not_found')
 
 
 def mcp_tools():
@@ -73,22 +79,25 @@ class Connected:
 
     def call(self, caller, tool, args=None):
         """One tool for one agent (`agent:<name>`): `status`, a TOOLS name or a MAIL name. Raises Problem."""
-        if tool != 'status' and tool not in TOOLS and tool not in MAIL:
+        if tool not in ('status', 'calendar_status') and tool not in TOOLS and tool not in MAIL and tool not in CALENDAR:
             raise Problem(404, 'unknown_tool', 'Unknown tool.')
         token, base = self._link()
         if not token:
             raise Problem(503, 'connected_accounts_unavailable', 'The Google app is not linked to Connected accounts yet. Update the '
                           'Google app, then approve its connection to Connected accounts.', app_link=LINK)
-        agent = str(caller or '').split(':', 1)[-1]
-        if not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,62}', agent):
-            agent = 'main'
-        headers = {'Accept': 'application/json', 'X-Wizard-Grant': token, 'X-Wizard-Agent': agent}
+        headers = {'Accept': 'application/json', 'X-Wizard-Grant': token}
+        if str(caller or '').startswith('agent:'):
+            agent = str(caller).split(':', 1)[-1]
+            headers['X-Wizard-Agent'] = agent if re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,62}', agent) else 'main'
+        else:
+            headers['X-Wizard-Owner'] = '1'  # only calendar calls: the owner's Approve in Calendar (an app grant here)
         data = None
-        if tool != 'status':
+        get = tool in ('status', 'calendar_status')
+        if not get:
             data = json.dumps(args if isinstance(args, dict) else {}).encode()
             headers['Content-Type'] = 'application/json'
         request = urllib.request.Request(base + '/service/google/v1/' + tool, data=data, headers=headers,
-                                         method='GET' if tool == 'status' else 'POST')
+                                         method='GET' if get else 'POST')
         try:
             with self.opener.open(request, timeout=self.timeout) as response:
                 raw, status = response.read(MAX_ANSWER + 1), response.status
@@ -108,6 +117,40 @@ class Connected:
             raise Problem(status if 400 <= status < 600 else 502, str(err.get('code') or 'connected_accounts_error')[:80],
                           str(err.get('message') or 'Connected accounts could not do that.')[:400], app_link=LINK)
         return value
+
+
+    def linked(self):
+        return bool(self._link()[0])
+
+    def calendar_account(self, caller, wanted):
+        """The email of the Connected accounts account that allowed Calendar edits for this call, or None when there is
+        none (or Connected accounts is missing, older, or has its switch off): the caller then gets this app's own
+        answer. Raises Problem only for a choice the agent must make (several accounts)."""
+        if not self.linked():
+            return None
+        try:
+            found = self.call(caller, 'calendar_status')
+        except Problem:
+            return None
+        emails = [str(a.get('email') or '') for a in found.get('accounts') or []
+                  if isinstance(a, dict) and a.get('calendar_edits') is True and a.get('status') == 'active' and a.get('email')]
+        if isinstance(wanted, str) and wanted.strip():
+            return next((e for e in emails if e.lower() == wanted.strip().lower()), None)
+        if len(emails) > 1:
+            raise Problem(400, 'account_required', 'Several Google accounts in Connected accounts can do this; name one with "account".',
+                          accounts=emails)
+        return emails[0] if emails else None
+
+    def calendar_caller(self, caller, email):
+        """A `call(method, url, query=None, body=None)` for mailcal's calendar handlers on that account."""
+        def call(method, url, query=None, body=None):
+            args = {'method': method, 'url': url, 'account': email}
+            if query:
+                args['query'] = query
+            if body is not None:
+                args['body'] = body
+            return self.call(caller, 'calendar_http', args).get('response') or {}
+        return call
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):

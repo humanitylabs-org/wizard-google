@@ -72,6 +72,8 @@ class Broker:
         self.access = AgentAccess(data_dir)
         # Calendar changes agents suggested at Suggest only, waiting for the owner's Approve / Dismiss in Calendar.
         self.suggestions = Suggestions(data_dir)
+        # Calendar on the Connected accounts sign-in (wizard-connectors#29): set by the server (connected.Connected).
+        self.connected_calendar = None
         # Wizard's Google app: a stateless sign-in service holds the shared client's secret and the
         # fixed return page. Sign-ins, tokens and every Google call stay on this box.
         self.signin_service = (signin_service or '').rstrip('/')
@@ -983,6 +985,20 @@ class Broker:
         raise Problem(400, 'account_required', 'Several accounts can do this; name one with "account".',
                       accounts=[a['email'] for _, a in candidates])
 
+    def _pick_calendar_account(self, caller, value, service):
+        """This app's own account for the tool; for calendar tools with none here, the Google account in Connected
+        accounts that allowed Calendar edits (wizard-connectors#29, its switch google-calendar-edits). Agent access was
+        checked before this, the same for both."""
+        try:
+            return self._pick_mail_account(value, service)
+        except Problem as problem:
+            if service != 'calendar' or self.connected_calendar is None or problem.code not in ('not_connected', 'service_off', 'account_not_found'):
+                raise
+            email = self.connected_calendar.calendar_account(caller, value)
+            if not email:
+                raise
+            return 'connected:' + email, {'email': email}
+
     def _own_call(self, account):
         def call(method, url, query=None, body=None):
             if query:
@@ -1013,12 +1029,15 @@ class Broker:
         except AccessRefused as refused:
             self._record(caller, '-', tool, refused.code)
             raise Problem(refused.status, refused.code, refused.message) from None
-        account, record = self._pick_mail_account(args.get('account'), service)
+        account, record = self._pick_calendar_account(caller, args.get('account'), service)
         if action == 'suggest':
             return self._suggest(caller, tool, args, handler, account, record)
-        via = 'composio' if account.startswith('q-') else 'own-client'
+        via = 'composio' if account.startswith('q-') else 'connected-accounts' if account.startswith('connected:') else 'own-client'
         try:
-            call = self.quick.caller_for(account, service) if via == 'composio' else self._own_call(account)
+            if via == 'connected-accounts':
+                call = self.connected_calendar.calendar_caller(caller, record['email'])
+            else:
+                call = self.quick.caller_for(account, service) if via == 'composio' else self._own_call(account)
             if tool in mailcal.MARKED:
                 result = handler(call, args, by=by or ('agent' if is_agent(caller) else 'owner'))
             else:
