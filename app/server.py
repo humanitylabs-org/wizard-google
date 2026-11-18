@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from broker import Broker, Problem  # noqa: E402
 from google import OPERATIONS, SERVICES  # noqa: E402
 import mailcal  # noqa: E402
+import connected  # noqa: E402
 from quick import QuickProblem, valid_attempt, valid_flow  # noqa: E402
 from agent_access import SUGGESTION_TOOLS, SUGGESTION_MCP_TOOLS  # noqa: E402
 
@@ -25,9 +26,16 @@ ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / 'web'
 APP_ID = 'wizard-google'
 VERSION = '0.4.4'
-# Owner feature switches (wizard.app-switches/1, wizard-os docs/APP_SWITCHES.md). None yet: every Google change so far
-# is a fix that ships on. New features are added here, off by default, with their issues, so the Tracker's Try it finds them.
-SWITCHES = []
+# Owner feature switches (wizard.app-switches/1, wizard-os docs/APP_SWITCHES.md). New features are added here, off by
+# default, with their issues, so the Tracker's Try it finds them.
+CONNECTED_SWITCH = 'connected-accounts'
+SWITCHES = [
+    {'id': CONNECTED_SWITCH, 'name': 'Use the Connected accounts sign-in',
+     'description': 'Your agent\'s Google tools (Drive, Docs, Sheets, Contacts and Gmail drafts) use the Google account in '
+                    'Connected accounts, so there is no second Google sign-in here. Quick connect and your own Google app '
+                    'keep working as before.',
+     'default': False, 'issues': ['humanitylabs-org/wizard-google#20']},
+]
 ASSETS = {'index.html', 'app.js', 'styles.css', 'boot.js', 'tokens.css', 'ui.css', 'appearance-client.js', 'sheet.js', 'icon.png', 'standalone.css', 'close.js', 'signin.js'}
 def out_origin(trusted, host, own):
     """The same box on another of its trusted ports. Wizard keeps links to its own origin inside Wizard, so the
@@ -134,7 +142,7 @@ ACCOUNT_ARG = {'type': 'string', 'description': 'Email (or the owner\'s label, e
 TOOL_OPS = {}  # 0.1 typed tools are replaced by google_run (gog). Apps keep the typed operations at /consumer/v1.
 
 
-def tools():
+def tools(app=None):
     services = ', '.join(f"{sv} ({spec['label']}: gog {'/'.join(spec['commands'])})" for sv, spec in SERVICES.items())
     return [
         {'name': 'google_status', 'description': 'Start here. The owner\'s connected Google accounts (work, personal...) and which services each one has '
@@ -154,7 +162,42 @@ def tools():
         {'name': 'google_help', 'description': 'gog\'s own machine-readable help for a command, e.g. "gmail search" or "calendar create": its flags, arguments '
                                                'and output. Empty lists the command groups you may use.',
          'annotations': {'readOnlyHint': True}, 'inputSchema': {'type': 'object', 'properties': {'command': {'type': 'string'}}}},
-    ] + mailcal.mcp_tools() + SUGGESTION_MCP_TOOLS
+    ] + mailcal.mcp_tools() + SUGGESTION_MCP_TOOLS + (connected.mcp_tools() if app and switch_on(app, CONNECTED_SWITCH) else [])
+
+
+def via_connected(app, caller, name, args):
+    """True when this agent call runs on the Connected accounts sign-in (switch connected-accounts, wizard-google#20):
+    Drive and Contacts always; Gmail search/read/draft when this app has no Gmail account of its own, or the agent
+    names an account this app does not have. Owners and apps (Mail's Send) keep this app's own accounts."""
+    if not str(caller).startswith('agent:') or not switch_on(app, CONNECTED_SWITCH):
+        return False
+    if name in connected.TOOLS:
+        return True
+    if name not in connected.MAIL:
+        return False
+    if not app.broker.mail_accounts('gmail'):
+        return True
+    wanted = args.get('account') if isinstance(args, dict) else None
+    if not isinstance(wanted, str) or not wanted.strip():
+        return False
+    wanted = wanted.strip().lower()
+    mine = list(app.broker.state['accounts'].values()) + list(app.broker.quick.section()['accounts'].values())
+    return not any(wanted in (a['id'], (a.get('email') or '').lower(), (a.get('label') or '').lower()) for a in mine)
+
+
+def agent_status(app, caller):
+    value = app.broker.agent_status()
+    if str(caller).startswith('agent:') and switch_on(app, CONNECTED_SWITCH):
+        try:
+            found = app.connected.call(caller, 'status')
+            value['connected_accounts'] = {'accounts': found.get('accounts', []), 'mail_access': found.get('mail_access'),
+                                           'tools': sorted(connected.TOOLS) + list(connected.MAIL),
+                                           'note': 'Drive, Docs, Sheets and Contacts, and Gmail search/read/draft when this '
+                                                   'app has no Gmail account of its own, run on the Connected accounts sign-in.'}
+            value['connected'] = value['connected'] or bool(value['connected_accounts']['accounts'])
+        except Problem as problem:
+            value['connected_accounts'] = {'error': problem.as_dict()}
+    return value
 
 
 def rpc(app, message, caller):
@@ -168,8 +211,9 @@ def rpc(app, message, caller):
     if method == 'ping':
         return {'jsonrpc': '2.0', 'id': rid, 'result': {}}
     if method == 'tools/list':
-        listed = app.broker.access.visible_tools(caller, [t['name'] for t in tools()])
-        return {'jsonrpc': '2.0', 'id': rid, 'result': {'tools': [t for t in tools() if t['name'] in listed]}}
+        every = tools(app)
+        listed = app.broker.access.visible_tools(caller, [t['name'] for t in every])
+        return {'jsonrpc': '2.0', 'id': rid, 'result': {'tools': [t for t in every if t['name'] in listed]}}
     if method != 'tools/call' or not isinstance(params, dict):
         return {'jsonrpc': '2.0', 'id': rid, 'error': {'code': -32601, 'message': 'Method not found'}}
     name, args = params.get('name'), params.get('arguments') or {}
@@ -178,7 +222,9 @@ def rpc(app, message, caller):
             raise Problem(400, 'invalid_arguments', 'Arguments must be an object.')
         broker = app.broker
         if name == 'google_status':
-            value = broker.agent_status()
+            value = agent_status(app, caller)
+        elif via_connected(app, caller, name, args):
+            value = app.connected.call(caller, name, args)
         elif name == 'google_run':
             value = broker.run_gog(caller, args.get('args'), args.get('account'))
         elif name == 'google_help':
@@ -202,6 +248,7 @@ class App:
                                        signin_service=config.signin_service, composio_transport=composio_transport)
         self.sessions = Sessions()
         self.grants = WizardGrants(config.grants_file)
+        self.connected = connected.Connected(config.grants_file)
         self.origins = []
 
     def origin_for(self, host):
@@ -239,6 +286,11 @@ def switches_doc(app):
     saved = _saved_switches(app)
     return {'contract': 'wizard.app-switches/1', 'switches': [
         dict(s, on=saved[s['id']] if isinstance(saved.get(s['id']), bool) else s['default']) for s in SWITCHES]}
+
+
+def switch_on(app, switch_id):
+    saved = _saved_switches(app).get(switch_id)
+    return saved if isinstance(saved, bool) else next((s['default'] for s in SWITCHES if s['id'] == switch_id), False)
 
 
 def set_switch(app, switch_id, on):
@@ -561,10 +613,14 @@ def handler_for(app):
                     # Box-only HTTP mirror of the MCP mail/calendar tools, for scripts and Wizard apps on this box.
                     caller = self.mcp_caller()
                     self.host()
-                    if local.group(1) not in mailcal.TOOLS and local.group(1) not in SUGGESTION_TOOLS:
+                    name = local.group(1)
+                    if name not in mailcal.TOOLS and name not in SUGGESTION_TOOLS and not (name in connected.TOOLS and via_connected(app, caller, name, {})):
                         raise Problem(404, 'not_found', 'Not found.')
-                    limit = MAX_MAIL_BODY if local.group(1) == 'mail_draft' else MAX_BODY
-                    return self.send_json(200, app.broker.mailcal_call(caller, local.group(1), self.body(limit)))
+                    limit = MAX_MAIL_BODY if name == 'mail_draft' else MAX_BODY
+                    body = self.body(limit)
+                    if via_connected(app, caller, name, body):
+                        return self.send_json(200, app.connected.call(caller, name, body))
+                    return self.send_json(200, app.broker.mailcal_call(caller, name, body))
                 if path.startswith('/consumer/v1/'):
                     caller = self.consumer_caller()
                     body = self.body()

@@ -28,7 +28,7 @@ view:
   port: 18812
 provides: [google-connection, mail-calendar]
 system: true
-uses: []
+uses: [connected-accounts]
 needs: []
 health: /healthz
 switches:
@@ -44,6 +44,7 @@ Connect Gmail, Calendar, Drive (with Docs and Sheets), Contacts and YouTube to y
 - **Your own Google client (works today).** More → Sign-in → Your own Google client walks you through Google Cloud (about ten minutes). No shared Google app is involved and nothing leaves this box except calls to Google.
 - **Quick sign-in (built, switched off).** A one-minute sign-in through Wizard's shared Google app is built but not turned on: the sign-in service is not deployed and the approach is still being evaluated. When it is unavailable, the app uses your own client automatically.
 - **Your agent works through gog.** Agents call `google_run` with a [gogcli](https://github.com/steipete/gogcli) command (pinned v0.45.0, checksum-verified). The app hands gog a short-lived access token for one account and only the command groups you switched on, in an empty folder; gog never sees a refresh token, a secret or this app's data.
+- **Connected accounts sign-in (switch, off by default: Tracker Try it, `connected-accounts`).** Your agent's Drive, Docs, Sheets, Contacts and Gmail search/read/draft tools use the Google account in Connected accounts (WizardOS's one Google connection), so there is no second Google sign-in here. Quick connect and your own Google client keep working; nothing is disconnected. Needs the Google app's connection to Connected accounts approved and Google tools for your wizard on in Connected accounts.
 - **Apps** (other Wizard apps) use typed operations at `/consumer/v1` with their Wizard grant or an access key, per account and operation, as before.
 - **Moves with the box.** Sign-ins, the store key and every switch live in this app's data folder (`${APP_DATA_DIR}/data`), so a backup restored on a new box needs no reconnect. Stop the old box before starting the new one.
 
