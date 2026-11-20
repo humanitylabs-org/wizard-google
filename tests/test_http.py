@@ -222,6 +222,30 @@ class LoopbackOwner(unittest.TestCase):
         self.assertEqual(value['agent_access']['mail'], 'draft_only')
         self.grants_file.write_text('{}')
 
+    def test_3d_mail_attachment_is_owner_only(self):
+        token = 'grant-token-for-wizard-mail-app'
+        self.grants_file.write_text(json.dumps({'incoming': [{'from': 'wizard-mail', 'sha256': hashlib.sha256(token.encode()).hexdigest()},
+                                                             {'from': 'host:agent-service', 'sha256': hashlib.sha256(b'gateway-grant-token-123').hexdigest()}]}))
+        c = Client(self.port)
+        call = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call', 'params': {'name': 'mail_attachment', 'arguments': {'id': 'm1', 'part': '1'}}}
+        for headers in ({}, {'X-Wizard-Agent': 'wizard-mail'}, {'X-Wizard-Grant': 'forged-grant-token-000'},
+                        {'X-Wizard-Grant': 'gateway-grant-token-123'}):
+            status, value, _ = c.send('POST', '/v1/mail_attachment', {'id': 'm1', 'part': '1'}, headers, browser=False)
+            self.assertEqual((status, value['error']['code']), (403, 'owner_only'), headers)
+            self.assertIn('Agents read mail as text', value['error']['message'])
+            status, value, _ = c.send('POST', '/mcp', call, headers, browser=False)
+            self.assertEqual(value['result']['structuredContent']['error']['code'], 'owner_only', headers)
+            status, value, _ = c.send('GET', '/v1/status', headers=headers, browser=False)
+            self.assertNotIn('mail_attachment', value['mail_calendar']['tools'], headers)
+        status, value, _ = c.send('POST', '/mcp', {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'}, {'X-Wizard-Grant': token}, browser=False)
+        self.assertNotIn('mail_attachment', {t['name'] for t in value['result']['tools']})  # never on MCP
+        # Mail with its grant passes the lock and reaches the account check; its status lists the tool.
+        status, value, _ = c.send('POST', '/v1/mail_attachment', {'id': 'm1', 'part': '1'}, {'X-Wizard-Grant': token}, browser=False)
+        self.assertNotIn(value['error']['code'], ('owner_only', 'not_found'))
+        status, value, _ = c.send('GET', '/v1/status', headers={'X-Wizard-Grant': token}, browser=False)
+        self.assertIn('mail_attachment', value['mail_calendar']['tools'])
+        self.grants_file.write_text('{}')
+
     def test_3c_calendar_level_and_owner_only_approve(self):
         token = 'grant-token-for-wizard-calendar'
         self.grants_file.write_text(json.dumps({'incoming': [{'from': 'wizard-calendar', 'sha256': hashlib.sha256(token.encode()).hexdigest()},

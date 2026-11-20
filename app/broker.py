@@ -813,8 +813,8 @@ class Broker:
         except self.gog.RunProblem as problem:
             raise Problem(400, problem.code, problem.message) from None
 
-    def agent_status(self):
-        """What the owner's agents can use. Never a token."""
+    def agent_status(self, caller='agent:main'):
+        """What the owner's agents can use (an app acting for the owner also sees its owner-only tools). Never a token."""
         client = self.state.get('client')
         return {'connected': (bool(client) and any(a['status'] == 'active' for a in self.state['accounts'].values()))
                 or any(a['status'] == 'active' for a in self.quick.section()['accounts'].values()),
@@ -828,7 +828,7 @@ class Broker:
                                 'commands': [], 'via': 'composio'} for a in self.quick.section()['accounts'].values()],
                 'services': {sv: spec['label'] for sv, spec in SERVICES.items()},
                 'mail_calendar': {'contract': mailcal.CONTRACT,
-                                  'tools': self.access.visible_tools('agent:main', sorted(mailcal.TOOLS) + ['calendar_suggestions']),
+                                  'tools': self.access.visible_tools(caller, sorted(mailcal.TOOLS) + ['calendar_suggestions']),
                                   'note': 'mail_* and calendar_* work on every account with Gmail/Calendar on. google_run (gog) needs an own-client account.'},
                 'app_link': '/wizard-os-home/?open=wizard-google'}
 
