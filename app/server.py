@@ -553,9 +553,9 @@ def handler_for(app):
                         return self.send_done('Connected', f'{who} is connected. This window closes by itself.', True)
                     return self.send_done('Not connected', (view.get('error') or {}).get('message') or 'Start again from Wizard.', True)
                 if path == '/v1/status':
-                    self.mcp_caller()
+                    caller = self.mcp_caller()
                     self.host()
-                    return self.send_json(200, app.broker.agent_status())
+                    return self.send_json(200, app.broker.agent_status(caller))
                 if path.startswith('/consumer/v1/'):
                     caller = self.consumer_caller()
                     if path == '/consumer/v1/status':

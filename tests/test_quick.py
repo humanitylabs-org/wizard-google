@@ -149,6 +149,13 @@ class FakeComposio:
             else:
                 labels[:] = [x for x in labels if x != 'TRASH']
             return 200, {'id': mid, 'labelIds': labels}
+        got = re.fullmatch(r'/gmail/v1/users/me/messages/([a-z0-9]+)/attachments/([A-Za-z0-9_-]+)', p)
+        if got and method == 'GET':
+            import base64
+            data = (self.mail.get(got.group(1)) or {}).get('file')
+            if not data or got.group(2) != 'ATT9':
+                return 404, {'error': {'code': 404, 'message': 'Not Found'}}
+            return 200, {'data': base64.urlsafe_b64encode(data).decode(), 'size': len(data)}
         if p.startswith('/gmail/v1/users/me/messages/'):
             mid = p.rsplit('/', 1)[1]
             if mid not in self.mail:
@@ -163,7 +170,9 @@ class FakeComposio:
                                                                                        {'name': 'Subject', 'value': m['subject']},
                                                                                        {'name': 'Message-ID', 'value': '<abc@example.com>'},
                                                                                        {'name': 'Date', 'value': 'Tue, 3 Nov 2026 09:00:00 +0700'}],
-                                     'parts': [{'mimeType': 'text/plain', 'body': {'data': data}}, {'mimeType': 'text/html', 'body': {'data': html}}]}}
+                                     'parts': [{'mimeType': 'text/plain', 'body': {'data': data}}, {'mimeType': 'text/html', 'body': {'data': html}}]
+                                     + ([{'partId': '2', 'mimeType': 'image/jpeg', 'filename': 'photo.jpg', 'headers': [],
+                                          'body': {'attachmentId': 'ATT9', 'size': m.get('file_size', len(m['file']))}}] if m.get('file') else [])}}
         if p == '/gmail/v1/users/me/drafts' and method == 'POST':
             did = f'r{len(self.drafts) + 1}'
             self.drafts[did] = body
@@ -365,6 +374,34 @@ class ConnectTests(QuickBase):
         kid = self.quick.section()['keys'][0]['id']
         self.assertGreaterEqual(self.quick.keys().public()[0]['calls_this_month'], 5)
         self.assertEqual(kid, self.quick.keys().public()[0]['id'])
+
+    def test_mail_attachment_through_composio_is_the_owners(self):
+        import base64
+        self.connect('gmail')
+        self.fake.mail['m1']['file'] = b'\xff\xd8\xff a photo'
+        listed = self.broker.mailcal_call('app:wizard-mail', 'mail_get', {'id': 'm1'})['message']
+        self.assertEqual(listed['attachments'], [{'name': 'photo.jpg', 'mime': 'image/jpeg', 'size': 11, 'part': '2',
+                                                  'content_id': None, 'inline': False}])
+        self.assertEqual(listed['inline_parts'], [])
+        # Agents read mail as text: refused at every level, whatever they call themselves.
+        for caller in ('agent:main', 'agent:wizard-mail'):
+            with self.assertRaises(Problem) as refused:
+                self.broker.mailcal_call(caller, 'mail_attachment', {'id': 'm1', 'part': '2'})
+            self.assertEqual((refused.exception.status, refused.exception.code), (403, 'owner_only'))
+        got = self.broker.mailcal_call('app:wizard-mail', 'mail_attachment', {'id': 'm1', 'part': '2'})
+        self.assertEqual((got['via'], got['contract'], got['account']), ('composio', 'wizard.mail-calendar/1', 'me@example.com'))
+        self.assertEqual(got['attachment'], {'name': 'photo.jpg', 'mime': 'image/jpeg', 'size': 11,
+                                             'base64': base64.b64encode(b'\xff\xd8\xff a photo').decode()})
+        with self.assertRaises(Problem) as missing:
+            self.broker.mailcal_call('app:wizard-mail', 'mail_attachment', {'id': 'm1', 'part': '7'})
+        self.assertEqual((missing.exception.status, missing.exception.code), (404, 'not_found'))
+        self.fake.mail['m1']['file_size'] = 26 * 1024 * 1024
+        with self.assertRaises(Problem) as big:
+            self.broker.mailcal_call('app:wizard-mail', 'mail_attachment', {'id': 'm1', 'part': '2'})
+        self.assertEqual((big.exception.status, big.exception.code), (413, 'attachment_too_big'))
+        # Agents' status never lists it; Mail (an app for the owner) sees it.
+        self.assertNotIn('mail_attachment', self.broker.agent_status()['mail_calendar']['tools'])
+        self.assertIn('mail_attachment', self.broker.agent_status('app:wizard-mail')['mail_calendar']['tools'])
 
     def test_agent_mail_levels(self):
         self.connect('gmail')

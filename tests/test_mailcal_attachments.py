@@ -1,11 +1,13 @@
-"""Drafts with attachments (contract 1.2): new files, keeping a draft's files on an in-place edit, forwarding files."""
+"""Drafts with attachments (contract 1.2): new files, keeping a draft's files on an in-place edit, forwarding files.
+Reading attachments (contract 1.6): parts in mail_get, one file's bytes from mail_attachment."""
 import base64
 import email
 import email.policy
 import unittest
 
 import mailcal
-from google import GMAIL
+from agent_access import AgentAccess
+from google import GMAIL, GoogleError
 
 
 def b64(data):
@@ -156,6 +158,121 @@ class Attachments(unittest.TestCase):
         for key in ('attachments', 'draft_id', 'remove_attachments', 'attachments_from'):
             self.assertIn(key, schema['properties'])
         self.assertEqual(schema['required'], [])
+
+
+PNG = b'\x89PNG\r\n\x1a\n tiny picture'
+
+
+class FakePhotoMail:
+    """Gmail message p1: HTML with a cid: logo (nameless inline part), a named inline photo and a PDF by attachment id."""
+
+    def __init__(self, big=False):
+        self.calls, self.big = [], big
+
+    def payload(self):
+        logo = {'partId': '0.2', 'mimeType': 'image/png', 'filename': '',
+                'headers': [{'name': 'Content-ID', 'value': ' <logo@x> '}, {'name': 'Content-Disposition', 'value': 'inline'}],
+                'body': {'data': b64url(PNG), 'size': len(PNG)}}
+        related = {'partId': '0', 'mimeType': 'multipart/related', 'filename': '', 'parts': [
+            {'partId': '0.1', 'mimeType': 'text/html', 'filename': '', 'body': {'data': b64url(b'<img src="cid:logo@x">')}}, logo]}
+        photo = {'partId': '1', 'mimeType': 'image/jpeg', 'filename': 'beach.jpg',
+                 'headers': [{'name': 'Content-Disposition', 'value': 'inline; filename="beach.jpg"'},
+                             {'name': 'Content-ID', 'value': '<beach@x>'}],
+                 'body': {'attachmentId': 'ATT-photo_1', 'size': 30 * 1024 * 1024 if self.big else len(PNG)}}
+        pdf = {'partId': '2', 'mimeType': 'application/pdf', 'filename': 'plan.pdf',
+               'headers': [{'name': 'Content-Disposition', 'value': 'attachment; filename="plan.pdf"'}],
+               'body': {'attachmentId': 'ATT2', 'size': len(PDF)}}
+        return {'partId': '', 'mimeType': 'multipart/mixed', 'headers': [{'name': 'Subject', 'value': 'Photos'}],
+                'parts': [related, photo, pdf]}
+
+    def __call__(self, method, url, query=None, body=None):
+        self.calls.append((method, url, query, body))
+        path = url[len(GMAIL):]
+        if method == 'GET' and path == '/messages/p1':
+            return {'id': 'p1', 'threadId': 't1', 'labelIds': ['INBOX'], 'payload': self.payload()}
+        if method == 'GET' and path == '/messages/p1/attachments/ATT-photo_1':
+            return {'data': b64url(PNG), 'size': len(PNG)}
+        if method == 'GET' and path == '/messages/p1/attachments/ATT2':
+            return {'data': b64url(PDF), 'size': len(PDF)}
+        raise AssertionError(f'unexpected {method} {url}')
+
+
+class ReadingAttachments(unittest.TestCase):
+    def test_mail_get_lists_parts_and_inline_pictures(self):
+        message = mailcal.mail_get(FakePhotoMail(), {'id': 'p1', 'format': 'html'})['message']
+        self.assertEqual(message['attachments'], [
+            {'name': 'beach.jpg', 'mime': 'image/jpeg', 'size': len(PNG), 'part': '1', 'content_id': 'beach@x', 'inline': True},
+            {'name': 'plan.pdf', 'mime': 'application/pdf', 'size': len(PDF), 'part': '2', 'content_id': None, 'inline': False}])
+        self.assertEqual(message['inline_parts'], [{'part': '0.2', 'mime': 'image/png', 'size': len(PNG), 'content_id': 'logo@x'}])
+        self.assertIn('cid:logo@x', message['body_html'])
+
+    def test_content_id_alone_means_inline_and_long_ids_are_dropped(self):
+        part = {'parts': [{'partId': '1', 'mimeType': 'image/gif', 'filename': 'a.gif', 'body': {'size': 3},
+                           'headers': [{'name': 'Content-ID', 'value': '<a@x>'}]},
+                          {'partId': '2', 'mimeType': 'image/gif', 'filename': '', 'body': {'size': 3},
+                           'headers': [{'name': 'Content-ID', 'value': '<' + 'x' * 301 + '>'}]},
+                          {'partId': '3', 'mimeType': 'text/plain', 'filename': '', 'body': {'size': 3},
+                           'headers': [{'name': 'Content-ID', 'value': '<t@x>'}]}]}
+        inline = []
+        found = mailcal._attachments(part, None, inline)
+        self.assertEqual((found[0]['inline'], found[0]['content_id']), (True, 'a@x'))
+        self.assertEqual(inline, [])  # a too-long Content-ID and a non-picture are not inline pictures
+
+    def test_attachment_by_attachment_id(self):
+        gmail = FakePhotoMail()
+        out = mailcal.mail_attachment(gmail, {'id': 'p1', 'part': '2'})
+        self.assertEqual(out['attachment'], {'name': 'plan.pdf', 'mime': 'application/pdf', 'size': len(PDF), 'base64': b64(PDF)})
+        self.assertEqual(out['untrusted'], mailcal.UNTRUSTED)
+        self.assertEqual([c[1][len(GMAIL):] for c in gmail.calls], ['/messages/p1', '/messages/p1/attachments/ATT2'])
+        self.assertEqual(gmail.calls[0][2], {'format': 'full'})
+        self.assertTrue(all(c[0] == 'GET' for c in gmail.calls))
+
+    def test_inline_picture_from_the_body_data(self):
+        gmail = FakePhotoMail()
+        out = mailcal.mail_attachment(gmail, {'id': 'p1', 'part': '0.2'})
+        self.assertEqual(out['attachment'], {'name': 'image.png', 'mime': 'image/png', 'size': len(PNG), 'base64': b64(PNG)})
+        self.assertEqual(len(gmail.calls), 1)  # small parts come inside the message; no second fetch
+        self.assertEqual(base64.b64decode(out['attachment']['base64']), PNG)
+
+    def test_unknown_part_is_not_found(self):
+        for part in ('9', '0', '1.7'):
+            with self.assertRaises(GoogleError, msg=part) as caught:
+                mailcal.mail_attachment(FakePhotoMail(), {'id': 'p1', 'part': part})
+            self.assertEqual((caught.exception.status, caught.exception.code), (404, 'not_found'))
+
+    def test_bad_arguments_refused_before_any_call(self):
+        for args in ({'id': 'p1'}, {'id': 'p1', 'part': '../1'}, {'id': 'p1', 'part': '1.'}, {'id': 'p1', 'part': '1' * 65},
+                     {'id': '../x', 'part': '1'}, {'id': 'p1', 'part': 1}):
+            gmail = FakePhotoMail()
+            with self.assertRaises(mailcal.BadArgs, msg=args):
+                mailcal.mail_attachment(gmail, args)
+            self.assertEqual(gmail.calls, [])
+
+    def test_too_big(self):
+        gmail = FakePhotoMail(big=True)
+        with self.assertRaises(GoogleError) as caught:
+            mailcal.mail_attachment(gmail, {'id': 'p1', 'part': '1'})
+        self.assertEqual((caught.exception.status, caught.exception.code), (413, 'attachment_too_big'))
+        self.assertEqual(len(gmail.calls), 1)  # the size from the message is enough: the bytes are never fetched
+
+    def test_owner_only_and_never_on_mcp(self):
+        self.assertIn('mail_attachment', mailcal.TOOLS)
+        self.assertNotIn('mail_attachment', [t['name'] for t in mailcal.mcp_tools()])
+        import tempfile
+        access = AgentAccess(tempfile.mkdtemp())
+        from agent_access import AccessRefused
+        for caller in ('agent:main', 'agent:wizard-mail', ''):
+            with self.assertRaises(AccessRefused) as caught:
+                access.check(caller, 'mail_attachment')
+            self.assertEqual((caught.exception.status, caught.exception.code), (403, 'owner_only'))
+            self.assertNotIn('mail_attachment', access.visible_tools(caller, ['mail_get', 'mail_attachment']))
+        self.assertIsNone(access.check('app:wizard-mail', 'mail_attachment'))
+        self.assertIn('mail_attachment', access.visible_tools('app:wizard-mail', ['mail_get', 'mail_attachment']))
+
+    def test_forwarding_skips_nameless_inline_pictures(self):
+        gmail = FakePhotoMail()
+        files = mailcal.message_files(gmail, 'p1', gmail.payload())
+        self.assertEqual([f['name'] for f in files], ['beach.jpg', 'plan.pdf'])
 
 
 if __name__ == '__main__':
