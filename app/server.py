@@ -35,7 +35,29 @@ SWITCHES = [
                     'Connected accounts, so there is no second Google sign-in here. Quick connect and your own Google app '
                     'keep working as before.',
      'default': False, 'issues': ['humanitylabs-org/wizard-google#20']},
+    {'id': 'agent-access-panel', 'name': 'Agent access in Connected accounts',
+     'description': 'Connected accounts > Agent access lists the Google accounts signed in here and shows and changes what '
+                    'agents may do with your mail and calendar. The level is still kept and enforced here only; a change '
+                    'there is the same as a change in Mail or Calendar > Settings > Agent access.',
+     'default': False, 'issues': ['humanitylabs-org/wizard-google#30']},
 ]
+# Connected accounts' Agent access screen (wizard-google#30, switch agent-access-panel): an owner page on the same box
+# origin reads and sets this app's agent levels here. Nothing is copied there; this app stays the only store.
+PANEL_SWITCH = 'agent-access-panel'
+PANEL_PATH = '/api/panel/agent-access'
+
+
+def panel_doc(app):
+    """Names of the Google accounts signed in here (no tokens, no services) and the agent levels, which apply to every
+    agent alike."""
+    settings = app.broker.mail_settings()
+    names = []
+    for a in settings['accounts']:
+        name = a.get('email') or a.get('label') or 'Google account'
+        if name not in names:
+            names.append(name)
+    return {'app': APP_ID, 'name': 'Google', 'accounts': [{'name': n} for n in names], 'applies_to': 'every_agent',
+            'agent_access': settings['agent_access'], 'kept_by': APP_ID}
 ASSETS = {'index.html', 'app.js', 'styles.css', 'boot.js', 'tokens.css', 'ui.css', 'appearance-client.js', 'sheet.js', 'icon.png', 'standalone.css', 'close.js', 'signin.js'}
 def out_origin(trusted, host, own):
     """The same box on another of its trusted ports. Wizard keeps links to its own origin inside Wizard, so the
@@ -418,6 +440,19 @@ def handler_for(app):
                 raise Problem(403, 'origin_rejected', 'Open this app from your Wizard.')
             return host
 
+        def panel_owner(self):
+            # Connected accounts' Agent access screen (wizard-google#30): the owner (Tailscale Serve login or owner
+            # token) from a page on this box's origin, with `X-Wizard-Agent-Access: 1` (a custom header, so no other
+            # site can send it). No session: the screen is another app's page. Off unless the switch is on.
+            if not switch_on(app, PANEL_SWITCH):
+                raise Problem(404, 'not_found', 'Not found.')
+            if self.headers.get('X-Wizard-Agent-Access') != '1':
+                raise Problem(403, 'owner_only', 'Only this Wizard\'s owner can see or change agent access.')
+            host = self.owner()
+            if (self.headers.get('Sec-Fetch-Site') or 'same-origin').lower() != 'same-origin':
+                raise Problem(403, 'origin_rejected', 'Open this from your Wizard.')
+            return host
+
         def same_origin_write(self, host):
             origin = (self.headers.get('Origin') or '').lower()
             if origin not in config.trusted_origins or origin != app.origin_for(host) or (self.headers.get('Sec-Fetch-Site') or 'same-origin').lower() != 'same-origin':
@@ -502,6 +537,9 @@ def handler_for(app):
                 if path == '/api/switches':
                     self.switch_owner()
                     return self.send_json(200, switches_doc(app))
+                if path == PANEL_PATH:
+                    self.panel_owner()
+                    return self.send_json(200, panel_doc(app))
                 if path == '/api/connection':
                     self.host()
                     if any(self.headers.get(x) for x in FORWARDING) or any(k.lower().startswith(('tailscale-', 'cf-')) for k in self.headers.keys()):
@@ -639,6 +677,14 @@ def handler_for(app):
                     if body['id'] not in {s['id'] for s in SWITCHES}:
                         raise Problem(404, 'unknown_switch', 'No such switch.')
                     return self.send_json(200, set_switch(app, body['id'], body['on']))
+                if path == PANEL_PATH:
+                    host = self.panel_owner()
+                    self.same_origin_write(host)
+                    body = self.body()
+                    if not body.keys() or not set(body) <= {'mail', 'calendar'}:
+                        raise Problem(400, 'invalid_body', 'Send {"mail": <level>} and/or {"calendar": <level>}.')
+                    app.broker.set_agent_access(body)
+                    return self.send_json(200, panel_doc(app))
                 host = self.owner()
                 origin = self.same_origin_write(host)
                 if path == '/api/session':
