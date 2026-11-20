@@ -4,7 +4,7 @@ id: wizard-google
 name: Google
 type: external
 category: system
-version: 0.5.0
+version: 0.5.1
 summary: Connect Google and choose what your agent may use. Quick connect (Gmail, Calendar) via Composio, or your own Google client.
 license: MIT
 source: https://github.com/humanitylabs-org/wizard-google
