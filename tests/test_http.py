@@ -353,13 +353,49 @@ class ShellOwner(unittest.TestCase):
         who = {'Tailscale-User-Login': 'owner@example.com', 'X-Wizard-Switch': '1'}
         status, doc, _ = c.send('GET', '/api/switches', headers=who, browser=False)
         self.assertEqual((status, doc['contract']), (200, 'wizard.app-switches/1'))
-        self.assertEqual([(x['id'], x['default'], x['on']) for x in doc['switches']], [('connected-accounts', False, False)])
+        self.assertEqual([(x['id'], x['default'], x['on']) for x in doc['switches']], [('connected-accounts', False, False), ('agent-access-panel', False, False)])
         post = {**who, 'Origin': 'https://box.tail1234.ts.net'}
         self.assertEqual(c.send('POST', '/api/switches', {'id': 'nope', 'on': True}, post, browser=False)[0], 404)
         self.assertEqual(c.send('POST', '/api/switches', {'id': 'nope', 'on': 'x'}, post, browser=False)[0], 400)
         self.assertEqual(c.send('POST', '/api/switches', {'id': 'nope', 'on': True}, {**post, 'Origin': 'https://evil.example'}, browser=False)[0], 403)
         self.assertEqual(c.send('GET', '/api/switches', headers={'Tailscale-User-Login': 'owner@example.com'}, browser=False)[0], 403)
         self.assertEqual(c.send('GET', '/api/switches', headers={**who, 'Tailscale-User-Login': 'guest@example.com'}, browser=False)[0], 401)
+
+    def test_agent_access_panel_for_connected_accounts(self):
+        # wizard-google#30: Connected accounts' Agent access screen reads and sets this app's levels; kept only here.
+        c = Client(self.port, 'box.tail1234.ts.net', 'https://box.tail1234.ts.net')
+        box = 'https://box.tail1234.ts.net'
+        who = {'Tailscale-User-Login': 'owner@example.com', 'X-Wizard-Agent-Access': '1', 'Sec-Fetch-Site': 'same-origin'}
+        switch = {'Tailscale-User-Login': 'owner@example.com', 'X-Wizard-Switch': '1', 'Origin': box}
+        self.assertEqual(c.send('GET', '/api/panel/agent-access', headers=who, browser=False)[0], 404)  # switch off
+        self.assertEqual(c.send('POST', '/api/switches', {'id': 'agent-access-panel', 'on': True}, switch, browser=False)[0], 200)
+        try:
+            self.app.broker.quick.section()['accounts']['q-panel1'] = {'id': 'q-panel1', 'email': 'me@example.com', 'label': '',
+                                                                       'status': 'active', 'services': ['gmail'], 'links': {'gmail': 'x'}}
+            status, doc, _ = c.send('GET', '/api/panel/agent-access', headers=who, browser=False)
+            self.assertEqual(status, 200, doc)
+            self.assertEqual(doc['accounts'], [{'name': 'me@example.com'}])
+            self.assertEqual((doc['agent_access']['mail'], doc['agent_access']['calendar'], doc['applies_to']),
+                             ('draft_only', 'suggest_only', 'every_agent'))
+            self.assertNotIn('token', json.dumps(doc))
+            # Set there -> changed here (the agents' level the MCP enforces).
+            status, doc, _ = c.send('POST', '/api/panel/agent-access', {'mail': 'read_only', 'calendar': 'can_edit'},
+                                    {**who, 'Origin': box}, browser=False)
+            self.assertEqual((status, doc['agent_access']['mail'], doc['agent_access']['calendar']), (200, 'read_only', 'can_edit'))
+            self.assertEqual((self.app.broker.access.level(), self.app.broker.access.calendar_level()), ('read_only', 'can_edit'))
+            # Set here (Mail / Calendar > Settings) -> shown there.
+            self.app.broker.set_agent_access({'mail': 'no_access'})
+            self.assertEqual(c.send('GET', '/api/panel/agent-access', headers=who, browser=False)[1]['agent_access']['mail'], 'no_access')
+            # Refused: no header, a stranger, another site, a cross-site fetch, a bad level, unknown keys.
+            self.assertEqual(c.send('GET', '/api/panel/agent-access', headers={**who, 'X-Wizard-Agent-Access': ''}, browser=False)[0], 403)
+            self.assertEqual(c.send('GET', '/api/panel/agent-access', headers={**who, 'Tailscale-User-Login': 'guest@example.com'}, browser=False)[0], 401)
+            self.assertEqual(c.send('GET', '/api/panel/agent-access', headers={**who, 'Sec-Fetch-Site': 'cross-site'}, browser=False)[0], 403)
+            for body, origin in (({'mail': 'draft_only'}, 'https://evil.example'), ({'mail': 'send'}, box), ({'grants': 1}, box)):
+                self.assertIn(c.send('POST', '/api/panel/agent-access', body, {**who, 'Origin': origin}, browser=False)[0], (400, 403))
+            self.assertEqual(self.app.broker.access.level(), 'no_access')
+        finally:
+            self.app.broker.quick.section()['accounts'].pop('q-panel1', None)
+            c.send('POST', '/api/switches', {'id': 'agent-access-panel', 'on': False}, switch, browser=False)
 
 
 if __name__ == '__main__':
