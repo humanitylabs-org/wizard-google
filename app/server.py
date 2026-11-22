@@ -25,7 +25,7 @@ from agent_access import SUGGESTION_TOOLS, SUGGESTION_MCP_TOOLS  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / 'web'
 APP_ID = 'wizard-google'
-VERSION = '0.5.1'
+VERSION = '0.5.2'
 # Owner feature switches (wizard.app-switches/1, wizard-os docs/APP_SWITCHES.md). New features are added here, off by
 # default, with their issues, so the Tracker's Try it finds them.
 CONNECTED_SWITCH = 'connected-accounts'
