@@ -353,7 +353,7 @@ class ShellOwner(unittest.TestCase):
         who = {'Tailscale-User-Login': 'owner@example.com', 'X-Wizard-Switch': '1'}
         status, doc, _ = c.send('GET', '/api/switches', headers=who, browser=False)
         self.assertEqual((status, doc['contract']), (200, 'wizard.app-switches/1'))
-        self.assertEqual([(x['id'], x['default'], x['on']) for x in doc['switches']], [('connected-accounts', False, False), ('agent-access-panel', False, False)])
+        self.assertEqual([(x['id'], x['default'], x['on']) for x in doc['switches']], [('connected-accounts', False, False)])
         post = {**who, 'Origin': 'https://box.tail1234.ts.net'}
         self.assertEqual(c.send('POST', '/api/switches', {'id': 'nope', 'on': True}, post, browser=False)[0], 404)
         self.assertEqual(c.send('POST', '/api/switches', {'id': 'nope', 'on': 'x'}, post, browser=False)[0], 400)
@@ -367,8 +367,8 @@ class ShellOwner(unittest.TestCase):
         box = 'https://box.tail1234.ts.net'
         who = {'Tailscale-User-Login': 'owner@example.com', 'X-Wizard-Agent-Access': '1', 'Sec-Fetch-Site': 'same-origin'}
         switch = {'Tailscale-User-Login': 'owner@example.com', 'X-Wizard-Switch': '1', 'Origin': box}
-        self.assertEqual(c.send('GET', '/api/panel/agent-access', headers=who, browser=False)[0], 404)  # switch off
-        self.assertEqual(c.send('POST', '/api/switches', {'id': 'agent-access-panel', 'on': True}, switch, browser=False)[0], 200)
+        # Always on (approved at show-and-tell): the old switch is gone and cannot be set.
+        self.assertEqual(c.send('POST', '/api/switches', {'id': 'agent-access-panel', 'on': False}, switch, browser=False)[0], 404)
         try:
             self.app.broker.quick.section()['accounts']['q-panel1'] = {'id': 'q-panel1', 'email': 'me@example.com', 'label': '',
                                                                        'status': 'active', 'services': ['gmail'], 'links': {'gmail': 'x'}}
@@ -395,7 +395,17 @@ class ShellOwner(unittest.TestCase):
             self.assertEqual(self.app.broker.access.level(), 'no_access')
         finally:
             self.app.broker.quick.section()['accounts'].pop('q-panel1', None)
-            c.send('POST', '/api/switches', {'id': 'agent-access-panel', 'on': False}, switch, browser=False)
+
+    def test_retired_switch_value_cleared(self):
+        # wizard-google#30: a saved agent-access-panel value is dropped at startup; other switches are kept.
+        path = Path(self.app.config.data_dir) / 'switches.json'
+        path.write_text(json.dumps({'agent-access-panel': False, 'connected-accounts': True}))
+        try:
+            server.clear_retired_switches(self.app)
+            self.assertEqual(json.loads(path.read_text()), {'connected-accounts': True})
+            self.assertTrue(server.switch_on(self.app, 'connected-accounts'))
+        finally:
+            path.write_text('{}')
 
 
 if __name__ == '__main__':

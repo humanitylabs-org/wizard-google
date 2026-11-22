@@ -35,15 +35,11 @@ SWITCHES = [
                     'Connected accounts, so there is no second Google sign-in here. Quick connect and your own Google app '
                     'keep working as before.',
      'default': False, 'issues': ['humanitylabs-org/wizard-google#20']},
-    {'id': 'agent-access-panel', 'name': 'Agent access in Connected accounts',
-     'description': 'Connected accounts > Agent access lists the Google accounts signed in here and shows and changes what '
-                    'agents may do with your mail and calendar. The level is still kept and enforced here only; a change '
-                    'there is the same as a change in Mail or Calendar > Settings > Agent access.',
-     'default': False, 'issues': ['humanitylabs-org/wizard-google#30']},
 ]
-# Connected accounts' Agent access screen (wizard-google#30, switch agent-access-panel): an owner page on the same box
-# origin reads and sets this app's agent levels here. Nothing is copied there; this app stays the only store.
-PANEL_SWITCH = 'agent-access-panel'
+# Switches that were removed (approved at show-and-tell, now always on). A saved value is cleared at startup.
+RETIRED_SWITCHES = {'agent-access-panel'}  # wizard-google#30
+# Connected accounts' Agent access screen (wizard-google#30): an owner page on the same box origin reads and sets this
+# app's agent levels here. Nothing is copied there; this app stays the only store.
 PANEL_PATH = '/api/panel/agent-access'
 
 
@@ -273,6 +269,7 @@ class App:
         self.connected = connected.Connected(config.grants_file)
         self.broker.connected_calendar = self.connected
         self.origins = []
+        clear_retired_switches(self)
 
     def origin_for(self, host):
         for scheme in ('https', 'http'):
@@ -326,6 +323,21 @@ def set_switch(app, switch_id, on):
         tmp.write_text(json.dumps(saved))
         os.replace(tmp, path)
     return switches_doc(app)
+
+
+def clear_retired_switches(app):
+    """Drop saved values of switches that no longer exist (RETIRED_SWITCHES), keeping the others."""
+    with SWITCH_LOCK:
+        saved = _saved_switches(app)
+        if not RETIRED_SWITCHES & set(saved):
+            return
+        path = Path(app.config.data_dir) / 'switches.json'
+        tmp = path.with_name('.switches.json.tmp')
+        try:
+            tmp.write_text(json.dumps({k: v for k, v in saved.items() if k not in RETIRED_SWITCHES}))
+            os.replace(tmp, path)
+        except OSError:
+            pass  # read-only or missing data dir: an unknown saved id is ignored anyway
 
 
 def handler_for(app):
@@ -443,9 +455,7 @@ def handler_for(app):
         def panel_owner(self):
             # Connected accounts' Agent access screen (wizard-google#30): the owner (Tailscale Serve login or owner
             # token) from a page on this box's origin, with `X-Wizard-Agent-Access: 1` (a custom header, so no other
-            # site can send it). No session: the screen is another app's page. Off unless the switch is on.
-            if not switch_on(app, PANEL_SWITCH):
-                raise Problem(404, 'not_found', 'Not found.')
+            # site can send it). No session: the screen is another app's page.
             if self.headers.get('X-Wizard-Agent-Access') != '1':
                 raise Problem(403, 'owner_only', 'Only this Wizard\'s owner can see or change agent access.')
             host = self.owner()
