@@ -28,16 +28,9 @@ APP_ID = 'wizard-google'
 VERSION = '0.5.2'
 # Owner feature switches (wizard.app-switches/1, wizard-os docs/APP_SWITCHES.md). New features are added here, off by
 # default, with their issues, so the Tracker's Try it finds them.
-CONNECTED_SWITCH = 'connected-accounts'
-SWITCHES = [
-    {'id': CONNECTED_SWITCH, 'name': 'Use the Connected accounts sign-in',
-     'description': 'Your agent\'s Google tools (Drive, Docs, Sheets, Contacts and Gmail drafts) use the Google account in '
-                    'Connected accounts, so there is no second Google sign-in here. Quick connect and your own Google app '
-                    'keep working as before.',
-     'default': False, 'issues': ['humanitylabs-org/wizard-google#20']},
-]
+SWITCHES = []
 # Switches that were removed (approved at show-and-tell, now always on). A saved value is cleared at startup.
-RETIRED_SWITCHES = {'agent-access-panel'}  # wizard-google#30
+RETIRED_SWITCHES = {'agent-access-panel', 'connected-accounts'}  # wizard-google#30, #20
 # Connected accounts' Agent access screen (wizard-google#30): an owner page on the same box origin reads and sets this
 # app's agent levels here. Nothing is copied there; this app stays the only store.
 PANEL_PATH = '/api/panel/agent-access'
@@ -180,14 +173,14 @@ def tools(app=None):
         {'name': 'google_help', 'description': 'gog\'s own machine-readable help for a command, e.g. "gmail search" or "calendar create": its flags, arguments '
                                                'and output. Empty lists the command groups you may use.',
          'annotations': {'readOnlyHint': True}, 'inputSchema': {'type': 'object', 'properties': {'command': {'type': 'string'}}}},
-    ] + mailcal.mcp_tools() + SUGGESTION_MCP_TOOLS + (connected.mcp_tools() if app and switch_on(app, CONNECTED_SWITCH) else [])
+    ] + mailcal.mcp_tools() + SUGGESTION_MCP_TOOLS + connected.mcp_tools()
 
 
 def via_connected(app, caller, name, args):
-    """True when this agent call runs on the Connected accounts sign-in (switch connected-accounts, wizard-google#20):
+    """True when this agent call runs on the Connected accounts sign-in (wizard-google#20, always on):
     Drive and Contacts always; Gmail search/read/draft when this app has no Gmail account of its own, or the agent
     names an account this app does not have. Owners and apps (Mail's Send) keep this app's own accounts."""
-    if not str(caller).startswith('agent:') or not switch_on(app, CONNECTED_SWITCH):
+    if not str(caller).startswith('agent:'):
         return False
     if name in connected.TOOLS:
         return True
@@ -205,7 +198,7 @@ def via_connected(app, caller, name, args):
 
 def agent_status(app, caller):
     value = app.broker.agent_status()
-    if str(caller).startswith('agent:') and switch_on(app, CONNECTED_SWITCH):
+    if str(caller).startswith('agent:'):
         try:
             found = app.connected.call(caller, 'status')
             value['connected_accounts'] = {'accounts': found.get('accounts', []), 'mail_access': found.get('mail_access'),
