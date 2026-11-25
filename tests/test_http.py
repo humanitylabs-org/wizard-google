@@ -177,7 +177,8 @@ class LoopbackOwner(unittest.TestCase):
         # Agents never see mail_send (Draft only is the highest agent level; the owner sends from Mail).
         self.assertEqual(names, {'google_status', 'google_run', 'google_help', 'mail_search', 'mail_get', 'mail_draft', 'mail_update', 'mail_update_bulk',
                                  'calendar_list_events', 'calendar_create_event', 'calendar_update_event', 'calendar_delete_event',
-                                 'calendar_respond', 'calendar_suggestions'})
+                                 'calendar_respond', 'calendar_suggestions',
+                                 'drive_search', 'drive_read', 'contacts_search'})  # Connected accounts sign-in (#20, always on)
 
     def test_3b_agents_cannot_send_and_only_the_owner_sets_the_level(self):
         token = 'grant-token-for-wizard-mail-app'
@@ -210,12 +211,14 @@ class LoopbackOwner(unittest.TestCase):
         self.assertEqual(status, 400)
         status, value, _ = self.owner.send('POST', '/api/agent-access', {'mail': 'read_only'})
         self.assertEqual((status, value['agent_access']['mail']), (200, 'read_only'))
+        # This box has no Gmail account of its own, so an agent's draft goes to the Connected accounts sign-in
+        # (wizard-google#20, always on), which is not linked in this test.
         status, value, _ = c.send('POST', '/v1/mail_draft', {'to': ['a@example.com'], 'body': 'x'}, browser=False)
-        self.assertEqual((status, value['error']['code']), (403, 'agent_access_denied'))
-        # A draft with a file is far over the ordinary body cap; it still reaches the tool (and its access check).
+        self.assertEqual((status, value['error']['code']), (503, 'connected_accounts_unavailable'))
+        # A draft with a file is far over the ordinary body cap; it still reaches the tool.
         big = {'to': ['a@example.com'], 'body': 'x', 'attachments': [{'name': 'a.pdf', 'base64': 'QUFB' * 100_000}]}
         status, value, _ = c.send('POST', '/v1/mail_draft', big, browser=False)
-        self.assertEqual((status, value['error']['code']), (403, 'agent_access_denied'))
+        self.assertEqual((status, value['error']['code']), (503, 'connected_accounts_unavailable'))
         status, value, _ = c.send('POST', '/v1/mail_search', {'query': 'x' * 70_000}, browser=False)
         self.assertEqual((status, value['error']['code']), (413, 'body_size'))
         status, value, _ = self.owner.send('POST', '/api/agent-access', {'mail': 'draft_only'})
@@ -353,7 +356,7 @@ class ShellOwner(unittest.TestCase):
         who = {'Tailscale-User-Login': 'owner@example.com', 'X-Wizard-Switch': '1'}
         status, doc, _ = c.send('GET', '/api/switches', headers=who, browser=False)
         self.assertEqual((status, doc['contract']), (200, 'wizard.app-switches/1'))
-        self.assertEqual([(x['id'], x['default'], x['on']) for x in doc['switches']], [('connected-accounts', False, False)])
+        self.assertEqual([(x['id'], x['default'], x['on']) for x in doc['switches']], [])
         post = {**who, 'Origin': 'https://box.tail1234.ts.net'}
         self.assertEqual(c.send('POST', '/api/switches', {'id': 'nope', 'on': True}, post, browser=False)[0], 404)
         self.assertEqual(c.send('POST', '/api/switches', {'id': 'nope', 'on': 'x'}, post, browser=False)[0], 400)
@@ -397,13 +400,14 @@ class ShellOwner(unittest.TestCase):
             self.app.broker.quick.section()['accounts'].pop('q-panel1', None)
 
     def test_retired_switch_value_cleared(self):
-        # wizard-google#30: a saved agent-access-panel value is dropped at startup; other switches are kept.
+        # wizard-google#30, #20: saved agent-access-panel and connected-accounts values are dropped at startup;
+        # other saved values are kept.
         path = Path(self.app.config.data_dir) / 'switches.json'
-        path.write_text(json.dumps({'agent-access-panel': False, 'connected-accounts': True}))
+        path.write_text(json.dumps({'agent-access-panel': False, 'connected-accounts': False, 'some-future': True}))
         try:
             server.clear_retired_switches(self.app)
-            self.assertEqual(json.loads(path.read_text()), {'connected-accounts': True})
-            self.assertTrue(server.switch_on(self.app, 'connected-accounts'))
+            self.assertEqual(json.loads(path.read_text()), {'some-future': True})
+            self.assertTrue(server.switch_on(self.app, 'some-future'))
         finally:
             path.write_text('{}')
 

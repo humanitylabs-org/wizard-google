@@ -1,4 +1,4 @@
-"""The Google app on the Connected accounts sign-in (wizard-google#20; switch connected-accounts, off by default).
+"""The Google app on the Connected accounts sign-in (wizard-google#20; always on since 0.5.3).
 
 Real HTTP server and handlers; Connected accounts is a fake HTTP server speaking its /service/google/v1 contract
 (wizard-connectors docs/GOOGLE_TOOLS.md). No Google sign-in of this app's own exists in these tests.
@@ -90,10 +90,6 @@ class ConnectedAccountsSignIn(unittest.TestCase):
     def setUp(self):
         FakeConnectedAccounts.calls.clear()
         FakeConnectedAccounts.level = 'draft_only'
-        self.switch(False)
-
-    def switch(self, on):
-        Path(self.dir, 'data', 'switches.json').write_text(json.dumps({'connected-accounts': on}))
 
     def call(self, name, args=None, headers=None):
         status, value, _ = Client(self.port).send('POST', '/mcp', {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
@@ -105,27 +101,24 @@ class ConnectedAccountsSignIn(unittest.TestCase):
         status, value, _ = Client(self.port).send('POST', '/mcp', {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'}, browser=False)
         return {t['name'] for t in value['result']['tools']}
 
-    def test_switch_is_declared_off_and_linked_to_the_issue(self):
+    def test_no_switch_left_and_an_old_off_value_is_ignored(self):
+        # Approved at show-and-tell (wizard-google#20): no switch, and a saved 'off' from before changes nothing.
         who = {'Tailscale-User-Login': 'owner@example.com', 'X-Wizard-Switch': '1'}
         self.app.config.owner_logins = {'owner@example.com'}
         self.app.config.shell_auth = 'tailscale-serve'
-        Path(self.dir, 'data', 'switches.json').unlink()
         c = Client(self.port, 'box.tail1234.ts.net', 'https://box.tail1234.ts.net')
         self.app.config.trusted_hosts.add('box.tail1234.ts.net')
         status, doc, _ = c.send('GET', '/api/switches', headers=who, browser=False)
         self.assertEqual(status, 200, doc)
-        switch = next(s for s in doc['switches'] if s['id'] == 'connected-accounts')
-        self.assertEqual((switch['default'], switch['on'], switch['issues']), (False, False, ['humanitylabs-org/wizard-google#20']))
+        self.assertNotIn('connected-accounts', [s['id'] for s in doc['switches']])
+        Path(self.dir, 'data', 'switches.json').write_text(json.dumps({'connected-accounts': False}))
+        try:
+            self.assertTrue({'drive_search', 'drive_read', 'contacts_search'} <= self.names())
+        finally:
+            Path(self.dir, 'data', 'switches.json').write_text('{}')
 
-    def test_off_nothing_changes(self):
-        self.assertFalse({'drive_search', 'drive_read', 'contacts_search'} & self.names())
-        self.assertEqual(self.call('mail_search')['error']['code'], 'not_connected')  # this app's own path, as before
-        self.assertNotIn('connected_accounts', self.call('google_status'))
-        self.assertEqual(FakeConnectedAccounts.calls, [])
-
-    def test_on_lists_drive_reads_doc_finds_contact_and_drafts_without_own_sign_in(self):
-        # The issue's done-when: only a Connected accounts sign-in, the switch on, no Google app sign-in.
-        self.switch(True)
+    def test_lists_drive_reads_doc_finds_contact_and_drafts_without_own_sign_in(self):
+        # The issue's done-when: only a Connected accounts sign-in, no Google app sign-in.
         self.assertTrue({'drive_search', 'drive_read', 'contacts_search', 'mail_draft'} <= self.names())
         status = self.call('google_status')
         self.assertTrue(status['connected'])
@@ -142,8 +135,7 @@ class ConnectedAccountsSignIn(unittest.TestCase):
         status, value, _ = Client(self.port).send('POST', '/v1/drive_search', {}, browser=False)
         self.assertEqual((status, value['files'][0]['id']), (200, 'doc1'))
 
-    def test_on_owner_level_errors_and_sending_stay_where_they_were(self):
-        self.switch(True)
+    def test_owner_level_errors_and_sending_stay_where_they_were(self):
         FakeConnectedAccounts.level = 'read_only'
         err = self.call('mail_draft', {'to': ['a@example.invalid']})['error']
         self.assertEqual(err['code'], 'agent_access_denied')
@@ -163,7 +155,6 @@ class ConnectedAccountsSignIn(unittest.TestCase):
             self.grants_file.write_text(json.dumps(doc))
 
     def test_not_linked_yet_is_a_plain_answer(self):
-        self.switch(True)
         doc = json.loads(self.grants_file.read_text())
         self.grants_file.write_text(json.dumps({**doc, 'outgoing': {}}))
         try:

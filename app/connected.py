@@ -1,6 +1,6 @@
-"""The Google app on the Connected accounts sign-in (wizard-google#20; switch `connected-accounts`, off by default).
+"""The Google app on the Connected accounts sign-in (wizard-google#20; always on since 0.5.3).
 
-Connected accounts is WizardOS's one Google connection (James, 18 Nov 2026). With the switch on, this app's agent tools
+Connected accounts is WizardOS's one Google connection (James, 18 Nov 2026). This app's agent tools
 for Drive, Docs, Sheets, Contacts and Gmail drafts use the Google account connected there, so an owner who signed in
 only there needs no second Google sign-in here. Quick connect and "Use your own Google app" stay as they are, and
 nothing is disconnected or revoked.
